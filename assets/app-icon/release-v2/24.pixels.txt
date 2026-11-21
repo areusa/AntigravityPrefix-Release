@@ -1,0 +1,25 @@
+像素原稿：.透明 b底板 e底板边缘 g玻璃 r玻璃边缘 L淡紫 M薄荷 C青色 A浅蓝 W星心 |光标
+........................
+...eeeeeeeeeeeeeeeeee...
+..ebbbbbbbbbbbbbbbbbbe..
+.ebbbbbbbbbbbbbbbbbbbbe.
+.ebbbbbbbbbbbbbbbbbbbbe.
+.ebbbbbbbbbbbbbbbbbbbbe.
+.ebbbbbbbbbbbbbbbbbbbbe.
+.ebrrrrrrrrrrrrrrrrrrbe.
+.erggggggggggggggggggre.
+.erggggAggggg|gggggggre.
+.erggggAggggg|gggggggre.
+.ergggLACgggg|gggggggre.
+.ergLLLWCCCgg|gggggggre.
+.ergggLMMgggg|gggggggre.
+.erggggMggggg|gggggggre.
+.erggggMggggg|gggggggre.
+.ebrrrrrrrrrrrrrrrrrrbe.
+.ebbbbbbbbbbbbbbbbbbbbe.
+.ebbbbbbbbbbbbbbbbbbbbe.
+.ebbbbbbbbbbbbbbbbbbbbe.
+.ebbbbbbbbbbbbbbbbbbbbe.
+..ebbbbbbbbbbbbbbbbbbe..
+...eeeeeeeeeeeeeeeeee...
+........................

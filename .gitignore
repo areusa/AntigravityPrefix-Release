@@ -1,0 +1,27 @@
+# 构建、测试与个人数据只留本机。
+**/bin/
+**/obj/
+/.build/
+/artifacts/
+/dist/
+*.pdb
+*.zip
+*.7z
+*.user
+*.suo
+*.log
+*.bak
+*.tmp
+.vs/
+.idea/
+.env
+.env.*
+*.pem
+*.pfx
+*.key
+**/fixture-data/
+**/captures/
+**/diagnostics/
+**/logs/
+settings.json
+emoji-settings.json

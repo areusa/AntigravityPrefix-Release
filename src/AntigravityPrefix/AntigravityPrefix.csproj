@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>AntigravityPrefix</AssemblyName>
+    <Version>0.1.0</Version>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+    <PathMap>$(MSBuildProjectDirectory)=/_/src/AntigravityPrefix</PathMap>
+    <DebugType Condition="'$(Configuration)' == 'Release'">none</DebugType>
+    <DebugSymbols Condition="'$(Configuration)' == 'Release'">false</DebugSymbols>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>../../assets/app-icon/release-v2/app.ico</ApplicationIcon>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <RuntimeFrameworkVersion>8.0.32</RuntimeFrameworkVersion>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+  </PropertyGroup>
+  <ItemGroup><PackageReference Include="FlaUI.UIA3" Version="5.0.0" /></ItemGroup>
+  <ItemGroup><PackageReference Include="Vortice.Direct2D1" Version="3.8.3" /></ItemGroup>
+  <ItemGroup>
+    <Resource Include="../../assets/app-icon/release-v2/app.ico" Link="assets/app-icon/release-v2/app.ico" />
+    <EmbeddedResource Include="../../assets/motion/approved-2026-10-28.json" LogicalName="AntigravityPrefix.Motion.Calibration.json" />
+    <EmbeddedResource Include="../../assets/motion/html-reference.json" LogicalName="AntigravityPrefix.Motion.Reference.json" />
+    <EmbeddedResource Include="../../assets/unicode/17.0/emoji-test.txt" LogicalName="AntigravityPrefix.Unicode.emoji-test.txt" />
+    <EmbeddedResource Include="../../assets/unicode/17.0/LICENSE.txt" LogicalName="AntigravityPrefix.Unicode.LICENSE.txt" />
+    <EmbeddedResource Include="../../THIRD-PARTY-NOTICES.txt" LogicalName="AntigravityPrefix.THIRD-PARTY-NOTICES.txt" />
+    <EmbeddedResource Include="../../assets/mingcute/LICENSE" LogicalName="AntigravityPrefix.MingCute.LICENSE.txt" />
+    <EmbeddedResource Include="$(NuGetPackageRoot)microsoft.netcore.app.runtime.win-x64/$(RuntimeFrameworkVersion)/LICENSE.TXT" LogicalName="AntigravityPrefix.Runtime.LICENSE.txt" />
+    <EmbeddedResource Include="$(NuGetPackageRoot)microsoft.netcore.app.runtime.win-x64/$(RuntimeFrameworkVersion)/THIRD-PARTY-NOTICES.TXT" LogicalName="AntigravityPrefix.Runtime.NOTICES.txt" />
+    <EmbeddedResource Include="$(NuGetPackageRoot)microsoft.windowsdesktop.app.runtime.win-x64/$(RuntimeFrameworkVersion)/LICENSE" LogicalName="AntigravityPrefix.Desktop.LICENSE.txt" />
+  </ItemGroup>
+</Project>
