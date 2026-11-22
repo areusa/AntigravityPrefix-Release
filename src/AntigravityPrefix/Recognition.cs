@@ -40,10 +40,25 @@ public static class Recognition
         && MoreActionsLabels.Contains((name ?? "").Trim(), StringComparer.OrdinalIgnoreCase);
     internal static bool IsRenameMenuItem(string? name) =>
         RenameMenuLabels.Contains((name ?? "").Trim().TrimEnd('.', '…'), StringComparer.OrdinalIgnoreCase);
+    internal static bool IsSameConversationHeaderBand(double bcLeft, double bcTop, double bcHeight, double btnLeft, double btnTop, double btnHeight, bool missingBounds)
+    {
+        if (missingBounds || bcHeight <= 0 || btnHeight <= 0) return true;
+        double tolerance = Math.Max(16, Math.Max(bcHeight, btnHeight) * 0.6);
+        return btnLeft >= bcLeft && Math.Abs(btnTop - bcTop) <= tolerance;
+    }
+    internal static bool IsSidePaneHeaderBoundary(bool isContainer, string? name)
+    {
+        if (isContainer) return true;
+        var trimmed = (name ?? "").Trim();
+        if (trimmed.Length == 0) return false;
+        return SidePaneBoundaryLabels.Contains(trimmed, StringComparer.OrdinalIgnoreCase)
+            || trimmed.StartsWith("Close ", StringComparison.OrdinalIgnoreCase);
+    }
     public static bool IsCurrentMarker(string? aria) => System.Text.RegularExpressions.Regex.IsMatch(aria ?? "", @"(?:^|[;,\s])(?:selected\s*[=:]\s*true|current\s*[=:]\s*(?:true|page))(?:$|[;,\s])", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
     // 不能使用泛化的“名称”或输入框文本推测重命名语义。
     static readonly string[] RenameLabels = ["Rename", "Rename chat", "Rename thread", "Rename conversation", "Edit title", "重命名", "重命名会话", "重命名聊天", "为聊天重命名", "修改聊天名称", "编辑标题"];
     static readonly string[] SaveLabels = ["Save", "Save changes", "Confirm", "Rename", "Done", "保存", "保存更改", "确定", "确认", "重命名", "完成"];
     static readonly string[] MoreActionsLabels = ["More actions", "更多操作"];
     static readonly string[] RenameMenuLabels = ["Rename", "Rename conversation", "Rename chat", "Rename thread", "重命名", "重命名会话", "重命名聊天"];
+    static readonly string[] SidePaneBoundaryLabels = ["New tab", "Maximize Pane", "Restore Pane", "Toggle Side Panel", "新建标签页", "最大化窗格", "切换侧边栏"];
 }

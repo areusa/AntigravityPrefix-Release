@@ -56,6 +56,17 @@ internal static class CompatibilityValidation
         foreach (var badMenu in new string?[] { null, "", "Unpin", "Archive", "Split", "Copy", "Edit title" })
             check(!Recognition.IsRenameMenuItem(badMenu), "无关菜单项不能误触发");
 
+        check(Recognition.IsSameConversationHeaderBand(397, 61, 43, 1833, 61, 43, false), "会话同水平顶栏的 More actions 应匹配");
+        check(!Recognition.IsSameConversationHeaderBand(397, 61, 43, 3678, 121, 42, false), "右侧页签头部的 More actions 必须被过滤");
+        check(!Recognition.IsSameConversationHeaderBand(397, 61, 43, 100, 61, 43, false), "Breadcrumb 左侧控件不应匹配为会话 More actions");
+        check(Recognition.IsSameConversationHeaderBand(397, 61, 43, 0, 0, 0, true), "缺失坐标时允许依赖树相邻顺序判定");
+
+        check(Recognition.IsSidePaneHeaderBoundary(true, null), "侧边容器本身应触发右面板边界停止");
+        foreach (var boundary in new[] { "New tab", "Maximize Pane", "Toggle Side Panel", "Close Directory", "Close Walkthrough" })
+            check(Recognition.IsSidePaneHeaderBoundary(false, boundary), "右面板标签栏控件应阻断后续扫描");
+        foreach (var nonBoundary in new string?[] { "More actions", "Toggle Overview Panel", "", null })
+            check(!Recognition.IsSidePaneHeaderBoundary(false, nonBoundary), "会话顶栏自身按钮不应被误判为侧边页签边界");
+
         // 保留通用非空单范围校验（覆盖独立验收窗口对话框分支）。
         check(Recognition.IsUnambiguousRenameScope(true, Recognition.IsRenameLabel("重命名聊天"), 1, 1, true), "独立对话框范围校验应保持兼容");
         check(!Recognition.IsUnambiguousRenameScope(true, Recognition.IsRenameLabel("Chat title"), 1, 1, true), "普通标签不能替代重命名语义");

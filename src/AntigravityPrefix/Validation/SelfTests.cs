@@ -87,6 +87,40 @@ internal static class SelfTests
             Check(AntigravityBridge.IsTransientOpenError(new System.Runtime.InteropServices.COMException("测试", unchecked((int)0x80040201))), "控件失效应允许只读重新发现");
             Check(!AntigravityBridge.IsTransientOpenError(new System.Runtime.InteropServices.COMException("测试", unchecked((int)0x80070005))), "权限拒绝不能当作控件重建重试");
             Check(!AntigravityBridge.IsTransientOpenError(new InvalidOperationException("身份变化")), "身份变化不能当作瞬态错误忽略");
+            int transientCount = 0, readCount = 0;
+            var recoveredCom = AntigravityBridge.PollTransient(
+                () => ++readCount <= 2 ? throw new System.Runtime.InteropServices.COMException("瞬态", unchecked((int)0x80040201)) : "ok",
+                v => v == "ok", 500, 0, CancellationToken.None, _ => ++transientCount);
+            Check(recoveredCom == "ok" && readCount == 3 && transientCount == 2, "连续 0x80040201 瞬态失效后应恢复并返回匹配结果");
+            transientCount = 0; readCount = 0;
+            var recoveredEna = AntigravityBridge.PollTransient(
+                () => ++readCount == 1 ? throw new FlaUI.Core.Exceptions.ElementNotAvailableException() : "ok",
+                v => v == "ok", 500, 0, CancellationToken.None, _ => ++transientCount);
+            Check(recoveredEna == "ok" && readCount == 2 && transientCount == 1, "ElementNotAvailableException 后应恢复并返回匹配结果");
+            transientCount = 0; readCount = 0; bool propagatedAccess = false;
+            try
+            {
+                AntigravityBridge.PollTransient<string>(() => { ++readCount; throw new System.Runtime.InteropServices.COMException("拒绝访问", unchecked((int)0x80070005)); },
+                    _ => true, 500, 0, CancellationToken.None, _ => ++transientCount);
+            }
+            catch (System.Runtime.InteropServices.COMException ex) when (ex.HResult == unchecked((int)0x80070005)) { propagatedAccess = true; }
+            Check(propagatedAccess && readCount == 1 && transientCount == 0, "0x80070005 权限异常必须首轮立即抛出");
+            transientCount = 0; readCount = 0; bool propagatedInvalid = false;
+            try
+            {
+                AntigravityBridge.PollTransient<string>(() => { ++readCount; throw new InvalidOperationException("非瞬态"); },
+                    _ => true, 500, 0, CancellationToken.None, _ => ++transientCount);
+            }
+            catch (InvalidOperationException) { propagatedInvalid = true; }
+            Check(propagatedInvalid && readCount == 1 && transientCount == 0, "InvalidOperationException 必须首轮立即抛出");
+            var timedOut = AntigravityBridge.PollTransient(() => "stale", v => v == "new", 30, 5, CancellationToken.None);
+            Check(timedOut is null, "超时未满足匹配条件应返回 null");
+            using var canceledCts = new CancellationTokenSource();
+            canceledCts.Cancel();
+            readCount = 0; bool canceled = false;
+            try { AntigravityBridge.PollTransient(() => { ++readCount; return "ok"; }, _ => true, 500, 0, canceledCts.Token); }
+            catch (OperationCanceledException) { canceled = true; }
+            Check(canceled && readCount == 0, "已取消令牌必须在读取前立即抛出取消异常");
             Check(System.Runtime.InteropServices.Marshal.SizeOf<RenameKeys.Input>() == 40, "Windows x64 INPUT 布局必须正确");
             Check(string.Join(",", RenameKeys.EnterSequence().Select(i => i.Data.Keyboard.Key)) == "13,13", "提交只发送 Enter 并立即释放");
             Check(RenameKeys.EnterSequence()[0].Data.Keyboard.Flags == 0 && RenameKeys.EnterSequence()[1].Data.Keyboard.Flags == 2, "Enter 提交不能遗漏松开事件");

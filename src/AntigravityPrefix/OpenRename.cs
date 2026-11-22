@@ -95,11 +95,9 @@ public sealed partial class AntigravityBridge
     List<AutomationElement> FindRenameMenuItems(nint hwnd, AutomationElement mainDoc)
     {
         var found = new List<AutomationElement>();
-        void ScanMenuRoot(AutomationElement root, AutomationElement? docBoundary, bool pruneSidebar)
+        void CollectRenameItems(IEnumerable<AutomationElement> elements, AutomationElement? docBoundary)
         {
-            var slice = Slice(root, docBoundary is null ? 80 : 200, docBoundary is null ? 200 : 400, 7,
-                stopDocuments: true, pruneContent: true, stopAt: pruneSidebar ? IsAntigravitySidebarNode : null);
-            foreach (var node in slice.Elements)
+            foreach (var node in elements)
             {
                 if (!Visible(node) || !node.Properties.IsEnabled.ValueOrDefault) continue;
                 var ct = node.Properties.ControlType.ValueOrDefault;
@@ -111,9 +109,84 @@ public sealed partial class AntigravityBridge
                 found.Add(node);
             }
         }
-        ScanMenuRoot(mainDoc, mainDoc, true);
+        void ScanMenuRoot(AutomationElement root, AutomationElement? docBoundary, bool pruneSidebar)
+        {
+            var slice = Slice(root, docBoundary is null ? 80 : 200, docBoundary is null ? 200 : 400, 7,
+                stopDocuments: true, pruneContent: true, stopAt: pruneSidebar ? IsAntigravitySidebarNode : null);
+            CollectRenameItems(slice.Elements, docBoundary);
+        }
+        var shallow = Slice(mainDoc, 140, 250, 4, stopDocuments: true, pruneContent: true,
+            stopAt: node => IsAntigravitySidebarNode(node) || IsAntigravityBreadcrumbNode(node));
+        foreach (var overlay in shallow.Elements)
+        {
+            if (!Visible(overlay)) continue;
+            var ct = overlay.Properties.ControlType.ValueOrDefault;
+            if (ct != ControlType.Menu && AriaRole(overlay) != "menu" && !Recognition.HasCssToken(Class(overlay), "agy-overlay")) continue;
+            var menuSlice = Slice(overlay, 60, 200, 5, stopDocuments: true, pruneContent: false);
+            CollectRenameItems(menuSlice.Elements, mainDoc);
+        }
+        if (found.Count == 0) ScanMenuRoot(mainDoc, mainDoc, true);
         foreach (var popupRoot in RelatedRoots(hwnd).Skip(1))
             ScanMenuRoot(popupRoot, null, false);
+        return found.GroupBy(Id).Select(g => g.First()).ToList();
+    }
+    static bool TryBounds(AutomationElement node, out double left, out double top, out double width, out double height)
+    {
+        left = top = width = height = 0;
+        try
+        {
+            var r = node.Properties.BoundingRectangle.ValueOrDefault;
+            if (double.IsNaN(r.Left) || double.IsInfinity(r.Left) || double.IsNaN(r.Top) || double.IsInfinity(r.Top)) return false;
+            if (r.Width <= 0 || r.Height <= 0) return false;
+            left = r.Left; top = r.Top; width = r.Width; height = r.Height;
+            return true;
+        }
+        catch { return false; }
+    }
+    List<AutomationElement> FindConversationMoreActions(AutomationElement mainDoc, AutomationElement breadcrumb)
+    {
+        var found = new List<AutomationElement>();
+        bool hasBcBounds = TryBounds(breadcrumb, out var bcL, out var bcT, out _, out var bcH);
+        var walker = automation.TreeWalkerFactory.GetControlViewWalker();
+        var sibling = walker.GetNextSibling(breadcrumb);
+        for (int step = 0; sibling is not null && step < 10; step++, sibling = walker.GetNextSibling(sibling))
+        {
+            if (IsAntigravityBreadcrumbNode(sibling) || IsAntigravitySidebarNode(sibling)) break;
+            var sibType = sibling.Properties.ControlType.ValueOrDefault;
+            var sibName = Name(sibling);
+            if (sibType is ControlType.Document or ControlType.Pane) break;
+            if (sibType == ControlType.Group)
+            {
+                bool hasGrpBounds = TryBounds(sibling, out _, out var gT, out _, out var gH);
+                bool isBody = !hasGrpBounds || (hasBcBounds && (gT >= bcT + bcH - 4 || gH > Math.Max(80, bcH * 2.2)));
+                if (isBody || IsAntigravityExcludedZone(sibling)) break;
+                var groupSlice = Slice(sibling, 16, 150, 2, stopDocuments: true, pruneContent: true);
+                if (groupSlice.Elements.Any(n => Recognition.IsSidePaneHeaderBoundary(false, Name(n)))) break;
+                foreach (var node in groupSlice.Elements)
+                {
+                    if (node.Properties.ControlType.ValueOrDefault != ControlType.Button || !Visible(node) || !node.Properties.IsEnabled.ValueOrDefault) continue;
+                    if (!Recognition.IsConversationMoreActions(Name(node), AriaProps(node),
+                        node.Patterns.ExpandCollapse.IsSupported || node.Patterns.Invoke.IsSupported,
+                        IsInExcludedZone(node, mainDoc, excludeSidebar: true))) continue;
+                    bool hasBtnBounds = TryBounds(node, out var bL, out var bT, out _, out var bH);
+                    if (Recognition.IsSameConversationHeaderBand(bcL, bcT, bcH, bL, bT, bH, !(hasBcBounds && hasBtnBounds)))
+                        found.Add(node);
+                }
+            }
+            else if (Recognition.IsSidePaneHeaderBoundary(false, sibName))
+            {
+                break;
+            }
+            else if (sibType == ControlType.Button && Visible(sibling) && sibling.Properties.IsEnabled.ValueOrDefault
+                && Recognition.IsConversationMoreActions(sibName, AriaProps(sibling),
+                    sibling.Patterns.ExpandCollapse.IsSupported || sibling.Patterns.Invoke.IsSupported,
+                    IsInExcludedZone(sibling, mainDoc, excludeSidebar: true)))
+            {
+                bool hasBtnBounds = TryBounds(sibling, out var bL, out var bT, out _, out var bH);
+                if (Recognition.IsSameConversationHeaderBand(bcL, bcT, bcH, bL, bT, bH, !(hasBcBounds && hasBtnBounds)))
+                    found.Add(sibling);
+            }
+        }
         return found.GroupBy(Id).Select(g => g.First()).ToList();
     }
     internal ProbeResult OpenRename(CancellationToken cancellation, Action<WorkStatus>? progress = null)
@@ -240,17 +313,31 @@ public sealed partial class AntigravityBridge
 
             stage = "定位当前会话 More actions 入口";
             Validate();
-            var shellSlice = Slice(mainDoc, 110, 400, 5, stopDocuments: true, pruneContent: true, stopAt: IsAntigravitySidebarNode);
-            var moreButtons = shellSlice.Elements
-                .Where(node => node.Properties.ControlType.ValueOrDefault == ControlType.Button && Visible(node) && node.Properties.IsEnabled.ValueOrDefault)
-                .Where(node => Recognition.IsConversationMoreActions(Name(node), AriaProps(node),
-                    node.Patterns.ExpandCollapse.IsSupported || node.Patterns.Invoke.IsSupported,
-                    IsInExcludedZone(node, mainDoc, excludeSidebar: true)))
+            var shellSlice = Slice(mainDoc, 140, 400, 4, stopDocuments: true, pruneContent: true, stopAt: node => IsAntigravitySidebarNode(node) || IsAntigravityBreadcrumbNode(node));
+            var breadcrumbs = shellSlice.Elements
+                .Where(node => Visible(node) && IsAntigravityBreadcrumbNode(node))
                 .GroupBy(Id).Select(g => g.First()).ToList();
+            if (breadcrumbs.Count > 1)
+            {
+                log.Write("打开重命名诊断", $"Breadcrumb数量={breadcrumbs.Count};拒绝猜测多会话分屏。");
+                throw new OpenRenameBlockedException("MENU_BUTTON_AMBIGUOUS", "存在多个会话顶部导航（如分屏视图），拒绝猜测。") { RecoveryTarget = identity, RequestId = requestId };
+            }
+            if (breadcrumbs.Count == 0)
+            {
+                log.Write("打开重命名诊断", "Breadcrumb数量=0;未检测到会话顶部导航。");
+                throw new OpenRenameBlockedException("MENU_BUTTON_UNPROVEN", "未找到当前会话顶部导航或 More actions 按钮；请确认已打开具体会话。") { RecoveryTarget = identity, RequestId = requestId };
+            }
+            var moreButtons = FindConversationMoreActions(mainDoc, breadcrumbs[0]);
             if (moreButtons.Count == 0)
+            {
+                log.Write("打开重命名诊断", "Breadcrumb=1;头部MoreActions=0");
                 throw new OpenRenameBlockedException("MENU_BUTTON_UNPROVEN", "未找到当前会话右上角 More actions 按钮；请确认已打开具体会话。") { RecoveryTarget = identity, RequestId = requestId };
+            }
             if (moreButtons.Count > 1)
+            {
+                log.Write("打开重命名诊断", $"Breadcrumb=1;头部MoreActions={moreButtons.Count}");
                 throw new OpenRenameBlockedException("MENU_BUTTON_AMBIGUOUS", "存在多个会话 More actions 按钮（如分屏视图），拒绝猜测。") { RecoveryTarget = identity, RequestId = requestId };
+            }
             var moreButton = moreButtons[0];
 
             stage = "展开 More actions 菜单";

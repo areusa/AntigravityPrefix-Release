@@ -24,7 +24,7 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
     string lastProbeLog = "";
     internal Action? DemoBeforeProbe { get; set; }
     const string InlineSaveId = "inline:enter";
-    sealed record Scope(AutomationElement Container, AutomationElement Editor, AutomationElement? Save, EditorBinding Binding);
+    sealed record Scope(AutomationElement Container, AutomationElement Editor, AutomationElement? Save, EditorBinding Binding, string? MainDocId = null);
     sealed record TreeSlice(List<AutomationElement> Elements, bool Complete, long Milliseconds);
 
     nint ResolveWindow()
@@ -237,7 +237,7 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
         }
         return false;
     }
-    Scope? InspectInlineEditor(AutomationElement editor, nint hwnd, AutomationElement? knownMainDoc = null)
+    Scope? InspectInlineEditor(AutomationElement editor, nint hwnd, AutomationElement? knownMainDoc = null, string? knownMainDocId = null)
     {
         if (!Visible(editor) || !editor.Properties.IsEnabled.ValueOrDefault) return null;
         if (editor.Properties.ControlType.ValueOrDefault != ControlType.Edit || editor.Properties.IsPassword.ValueOrDefault) return null;
@@ -275,6 +275,7 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
             }
             ancestor = walker.GetParent(ancestor);
         }
+        string? verifiedMainDocId = null;
         if (demoWindow != 0)
         {
             if (foundDoc is not null || inExcludedZone || !inTrustedRenameZone) return null;
@@ -286,8 +287,14 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
                 log.Write("识别拒绝-内联输入框", "未找到所属文档边界。");
                 return null;
             }
-            var mainDoc = knownMainDoc ?? MainDocument(automation.FromHandle(hwnd), hwnd);
-            bool sameMainDoc = mainDoc is not null && Id(mainDoc) == Id(foundDoc);
+            var foundDocId = Id(foundDoc);
+            string? expectedDocId = knownMainDocId ?? (knownMainDoc is not null ? Id(knownMainDoc) : null);
+            if (expectedDocId is null)
+            {
+                var mainDoc = MainDocument(automation.FromHandle(hwnd), hwnd);
+                expectedDocId = mainDoc is null ? null : Id(mainDoc);
+            }
+            bool sameMainDoc = expectedDocId is not null && expectedDocId == foundDocId;
             bool verified = WindowIdentity.Read(hwnd) is not null;
             bool ownedRoot = HasOwnedNativeRoot(foundDoc, hwnd, pid);
             if (!Recognition.IsTrustedAntigravityInlineEditor(sameMainDoc, verified, ownedRoot, inTrustedRenameZone, inExcludedZone, editorName, true, multiline, false))
@@ -295,17 +302,18 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
                 log.Write("识别拒绝-内联输入框", $"主文档一致={sameMainDoc};官方窗口={verified};原生归属={ownedRoot};信任区域={inTrustedRenameZone};排除区域={inExcludedZone}");
                 return null;
             }
+            verifiedMainDocId = expectedDocId;
         }
         var value = valuePattern.Value.Value;
         if (!Recognition.IsValidTitle(value)) { log.Write("识别拒绝-文本", "输入值不满足单行非空标题规则；未记录原文。"); return null; }
         var id = Id(editor);
         openDialogEvidence?.Add(id);
         var binding = new EditorBinding(hwnd, (int)pid, id, id, InlineSaveId, value, InlineCommit: true);
-        return new Scope(editor, editor, null, binding);
+        return new Scope(editor, editor, null, binding, verifiedMainDocId);
     }
-    Scope? InspectScope(Scope scope, nint hwnd) =>
-        scope.Binding.InlineCommit ? InspectInlineEditor(scope.Editor, hwnd) : InspectDialog(scope.Container, hwnd);
-    Scope? FocusedScope(nint hwnd)
+    Scope? InspectScope(Scope scope, nint hwnd, string? knownMainDocId = null) =>
+        scope.Binding.InlineCommit ? InspectInlineEditor(scope.Editor, hwnd, knownMainDocId: knownMainDocId) : InspectDialog(scope.Container, hwnd);
+    Scope? FocusedScope(nint hwnd, string? knownMainDocId = null)
     {
         try
         {
@@ -314,7 +322,7 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
             Native.GetWindowThreadProcessId(hwnd, out var pid);
             if (current.Properties.ProcessId.ValueOrDefault != pid)
             { log.Write("识别拒绝-焦点", "焦点控件不属于目标进程，改用受限发现。"); return null; }
-            var inline = InspectInlineEditor(current, hwnd);
+            var inline = InspectInlineEditor(current, hwnd, knownMainDocId: knownMainDocId);
             if (inline is not null) return inline;
             var walker = automation.TreeWalkerFactory.GetControlViewWalker();
             for (var depth = 0; current is not null && depth < 24; depth++)
@@ -409,7 +417,7 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
         }
         var mainDoc = MainDocument(automation.FromHandle(hwnd), hwnd);
         if (mainDoc is null) return found;
-        var shell = Slice(mainDoc, 90, 300, maxDepth: 4, stopDocuments: true, pruneContent: true);
+        var shell = Slice(mainDoc, 140, 320, maxDepth: 4, stopDocuments: true, pruneContent: true, stopAt: node => IsAntigravitySidebarNode(node) || IsAntigravityBreadcrumbNode(node));
         foreach (var node in shell.Elements)
             if (IsDialog(node, hwnd))
             {
@@ -517,7 +525,27 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
         try { using var p = Process.GetProcessById((int)pid); proc = System.IO.Path.GetFileName(p.MainModule?.FileName ?? ""); } catch { }
         return $"0x{hwnd:X}(cls={cls},proc={proc})";
     }
-    Scope Revalidate(EditorBinding expected)
+    internal static T? PollTransient<T>(Func<T?> read, Func<T, bool> accept, int timeoutMilliseconds, int delayMilliseconds, CancellationToken cancellation, Action<Exception>? onTransient = null, Func<int>? sleepMilliseconds = null) where T : class
+    {
+        var watch = Stopwatch.StartNew();
+        while (true)
+        {
+            cancellation.ThrowIfCancellationRequested();
+            try
+            {
+                var value = read();
+                if (value is not null && accept(value)) return value;
+            }
+            catch (Exception ex) when (IsTransientOpenError(ex))
+            {
+                onTransient?.Invoke(ex);
+            }
+            if (watch.ElapsedMilliseconds >= timeoutMilliseconds) return null;
+            int wait = sleepMilliseconds?.Invoke() ?? delayMilliseconds;
+            if (wait > 0) Thread.Sleep(wait);
+        }
+    }
+    nint ResolveWindowWithRetry()
     {
         var resolved = ResolveWindow();
         if (resolved == 0 && Native.GetForegroundWindow() == 0)
@@ -525,21 +553,88 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
             Thread.Sleep(35);
             resolved = ResolveWindow();
         }
+        return resolved;
+    }
+    Scope? TryInspectMatchingScope(Scope reference, EditorBinding expectedBinding, string? knownMainDocId, string stage)
+    {
+        bool directTransient = false;
+        Scope? direct = null;
+        try
+        {
+            direct = InspectScope(reference, expectedBinding.Window, knownMainDocId);
+        }
+        catch (Exception ex) when (IsTransientOpenError(ex))
+        {
+            directTransient = true;
+            log.Write("重命名瞬态", $"阶段={stage};动作=InspectScope;HResult=0x{ex.HResult:X8}");
+        }
+        if (direct is not null)
+        {
+            if (Recognition.IsSameBinding(expectedBinding, direct.Binding)) return direct;
+            if (direct.Binding.ScopeId == expectedBinding.ScopeId && direct.Binding.EditorId == expectedBinding.EditorId) return null;
+        }
+        var focused = FocusedScope(expectedBinding.Window, knownMainDocId);
+        if (focused is not null && Recognition.IsSameBinding(expectedBinding, focused.Binding)) return focused;
+        if (directTransient || direct is null)
+        {
+            try
+            {
+                var scopes = FindScopes(expectedBinding.Window);
+                if (scopes.Count == 1 && Recognition.IsSameBinding(expectedBinding, scopes[0].Binding)) return scopes[0];
+            }
+            catch (Exception ex) when (IsTransientOpenError(ex))
+            {
+                log.Write("重命名瞬态", $"阶段={stage};动作=FindScopes;HResult=0x{ex.HResult:X8}");
+            }
+        }
+        return null;
+    }
+    Scope Revalidate(EditorBinding expected)
+    {
+        var resolved = ResolveWindowWithRetry();
         if (resolved != expected.Window)
         {
             log.Write("重命名核验失败", $"原因=窗口不匹配;expected=0x{expected.Window:X};resolved=0x{resolved:X};fg={DescribeWindow(Native.GetForegroundWindow())};own=0x{OwnWindow:X};last=0x{lastWindow:X};tracking={TrackingMode};cached={cached is not null}");
             throw new InvalidOperationException("目标窗口已变化，请重新打开重命名框");
         }
-        Scope? current = null;
-        if (cached is not null)
+        Scope? ReadOnce(out bool sawTransient)
         {
-            try { current = InspectScope(cached, expected.Window); } catch { cached = null; }
+            sawTransient = false;
+            Scope? found = null;
+            if (cached is not null)
+            {
+                try { found = InspectScope(cached, expected.Window); }
+                catch (Exception ex) when (IsTransientOpenError(ex))
+                {
+                    cached = null;
+                    sawTransient = true;
+                    log.Write("重命名瞬态", $"阶段=写入前核验;动作=InspectScope;HResult=0x{ex.HResult:X8}");
+                }
+                catch { cached = null; }
+            }
+            if (found is null) found = FocusedScope(expected.Window);
+            if (found is null)
+            {
+                try
+                {
+                    var scopes = FindScopes(expected.Window);
+                    if (scopes.Count == 1) found = scopes[0];
+                }
+                catch (Exception ex) when (IsTransientOpenError(ex))
+                {
+                    sawTransient = true;
+                    log.Write("重命名瞬态", $"阶段=写入前核验;动作=FindScopes;HResult=0x{ex.HResult:X8}");
+                }
+            }
+            return found;
         }
-        if (current is null) current = FocusedScope(expected.Window);
-        if (current is null)
+        var watch = Stopwatch.StartNew();
+        Scope? current;
+        while (true)
         {
-            var scopes = FindScopes(expected.Window);
-            if (scopes.Count == 1) current = scopes[0];
+            current = ReadOnce(out bool sawTransient);
+            if (current is not null || !sawTransient || watch.ElapsedMilliseconds >= 600) break;
+            Thread.Sleep(50);
         }
         if (current is null || !Recognition.IsSameBinding(expected, current.Binding))
         {
@@ -570,22 +665,29 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
         cancellation.ThrowIfCancellationRequested();
         if (rulesCurrent?.Invoke() == false) throw new InvalidOperationException("emoji 配置已经改变，本次未写入。");
         blocked[expected.Key] = scope.Container;
+        var knownMainDocId = scope.MainDocId;
         progress(new(StatusKind.Processing, "正在修改名称…"));
         log.Write("重命名", "已校验窗口、输入框及原始文本，开始写入");
-        scope.Editor.Patterns.Value.Pattern.SetValue(newTitle);
-        var expectedAfter = expected with { OriginalValue = newTitle };
-        Scope? updated = null;
-        var settle = Stopwatch.StartNew();
-        while (settle.ElapsedMilliseconds < 1200)
+        try
         {
-            updated = InspectScope(scope, expected.Window);
-            if (updated is not null && Recognition.IsSameBinding(expectedAfter, updated.Binding)
-                && (updated.Binding.InlineCommit || updated.Save?.Properties.IsEnabled.ValueOrDefault == true)) break;
-            Thread.Sleep(60);
+            scope.Editor.Patterns.Value.Pattern.SetValue(newTitle);
         }
+        catch (Exception ex) when (IsTransientOpenError(ex))
+        {
+            // UIA SetValue 发送后元素可能立刻重绘失效；绝不重放 SetValue，只做严格回读核验。
+            log.Write("重命名瞬态", $"阶段=SetValue;HResult=0x{ex.HResult:X8};已禁止二次写入，转入写入后严格核验。");
+        }
+        var expectedAfter = expected with { OriginalValue = newTitle };
+        var updated = PollTransient(
+            () => TryInspectMatchingScope(scope, expectedAfter, knownMainDocId, "写入后核验"),
+            candidate => candidate.Binding.InlineCommit || candidate.Save?.Properties.IsEnabled.ValueOrDefault == true,
+            1500,
+            50,
+            cancellation,
+            ex => log.Write("重命名瞬态", $"阶段=写入后核验;HResult=0x{ex.HResult:X8}"));
         if (updated is null || !Recognition.IsSameBinding(expectedAfter, updated.Binding))
             throw new InvalidOperationException("写入后内容或控件发生变化，未提交");
-        if (ResolveWindow() != expected.Window) throw new InvalidOperationException("前台窗口已变化，未提交");
+        if (ResolveWindowWithRetry() != expected.Window) throw new InvalidOperationException("前台窗口已变化，未提交");
         cancellation.ThrowIfCancellationRequested();
         if (rulesCurrent?.Invoke() == false) throw new InvalidOperationException("emoji 配置已经改变，本次未保存。");
         if (!updated.Binding.InlineCommit)
@@ -613,9 +715,16 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
                 while (!HasEditorFocus(updated.Editor, expectedAfter.EditorId) && focusWait.ElapsedMilliseconds < 250)
                     Thread.Sleep(35);
             }
-            var focusedCheck = InspectInlineEditor(updated.Editor, expected.Window);
+            var focusedCheck = PollTransient(
+                () => TryInspectMatchingScope(updated, expectedAfter, knownMainDocId, "提交前核验"),
+                candidate => HasEditorFocus(candidate.Editor, expectedAfter.EditorId),
+                600,
+                45,
+                cancellation,
+                ex => log.Write("重命名瞬态", $"阶段=提交前核验;HResult=0x{ex.HResult:X8}"));
             if (focusedCheck is null || !Recognition.IsSameBinding(expectedAfter, focusedCheck.Binding) || !HasEditorFocus(focusedCheck.Editor, expectedAfter.EditorId))
                 throw new InvalidOperationException("写入后输入框未保持焦点或内容已变化，未发送回车提交");
+            updated = focusedCheck;
             var modWait = Stopwatch.StartNew();
             while (!RenameKeys.ModifiersReleased() && modWait.ElapsedMilliseconds < 300) Thread.Sleep(25);
             if (!RenameKeys.ModifiersReleased()) throw new InvalidOperationException("检测到修饰键尚未松开，未发送回车提交");
