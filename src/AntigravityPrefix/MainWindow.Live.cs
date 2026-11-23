@@ -68,6 +68,8 @@ public partial class MainWindow
             if (value)
             {
                 Topmost = false;
+                if (WindowTracker.IsTopmost(ownHandle))
+                    TrackingNative.SetWindowPos(ownHandle, WindowTracker.HwndNoTopmost, 0, 0, 0, 0, WindowTracker.PlaceAboveFlags);
                 TraceMode("置顶已切换；准备 tracker");
                 tracker = new WindowTracker(bar, () => !operation, TrackingChanged, demoHandle,
                     testIdentity: DemoLostHost && demoHandle != 0 ? _ => null : null);

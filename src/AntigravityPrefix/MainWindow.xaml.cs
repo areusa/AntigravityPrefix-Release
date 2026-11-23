@@ -111,6 +111,7 @@ public partial class MainWindow : Window
             timer.Start();
             await Scan();
         };
+        Closing += (_, _) => { tracker?.Dispose(); tracker = null; };
         Closed += (_, _) => { closed = true; modeTransition?.Finish("工具关闭"); lifetime.Cancel(); timer.Stop(); tracker?.Dispose(); tracker = null; bar?.Close(); bar = null; worker.Dispose(); if (mock is not null) mock.Close(); };
         EnableActions(false);
     }

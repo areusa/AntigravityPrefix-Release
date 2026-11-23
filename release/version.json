@@ -1,9 +1,9 @@
 {
     "name":  "AntigravityPrefix",
-    "version":  "0.1.1",
+    "version":  "0.1.2",
     "platform":  "win-x64",
     "executable":  "AntigravityPrefix.exe",
-    "sha256":  "2e7d2ee5c55a74d541170b811d08b62bc4accbcb1d085ca0e56385260880dc2b",
+    "sha256":  "8bf5736ccdc680936d311fdefa10d9b52c2093b9a42722b3ea7d2470dc7afb1b",
     "selfTest":  "passed",
     "automationWorkerTest":  "passed",
     "configuration":  "系统 LocalApplicationData 下 ./AntigravityPrefix/emoji-settings.json；发布不覆盖"

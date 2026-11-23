@@ -183,7 +183,8 @@ internal sealed class WindowTracker : IDisposable
                     bar.Motion.Interrupt("宿主定位完成");
                 }
                 // 恢复或换绑时把条窗插在宿主附近，不抬升到其他应用上方。
-                if (wasHidden || targetChanged || lastForeground != foreground) PlaceAbove(handle, target.Handle);
+                if (wasHidden || targetChanged || lastForeground != foreground || (!IsTopmost(target.Handle) && IsTopmost(handle)))
+                    PlaceAbove(handle, target.Handle);
             }
             else if (bar.IsVisible) bar.Hide();
         }
@@ -204,11 +205,33 @@ internal sealed class WindowTracker : IDisposable
     nint lastForeground;
     TrackingNative.Rect lastHost;
     double lastDpi;
+    internal const nint HwndTopmost = -1, HwndNoTopmost = -2;
+    internal const uint PlaceAboveFlags = 0x0213; // SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER
+
+    internal static bool IsTopmost(nint hwnd) => hwnd != 0 && (TrackingNative.GetWindowLongPtrW(hwnd, -20).ToInt64() & 0x8L) != 0;
+
+    internal static nint? ResolveInsertAfter(nint bar, nint beforeHost, nint beforeBar, bool hostTopmost, bool barTopmost, bool beforeHostTopmost, bool beforeBarTopmost)
+    {
+        if (beforeHost == bar && hostTopmost == barTopmost) return null;
+        var anchor = beforeHost == bar ? beforeBar : beforeHost;
+        bool anchorTopmost = beforeHost == bar ? beforeBarTopmost : beforeHostTopmost;
+        if (!hostTopmost)
+            return anchor == 0 || anchorTopmost ? HwndNoTopmost : anchor;
+        return anchor == 0 ? HwndTopmost : anchor;
+    }
+
     internal static void PlaceAbove(nint bar, nint host)
     {
-        var before = TrackingNative.GetWindow(host, 3);
-        if (before == bar) return;
-        TrackingNative.SetWindowPos(bar, before, 0, 0, 0, 0, 0x13);
+        if (bar == 0 || host == 0) return;
+        bool hostTopmost = IsTopmost(host);
+        bool barTopmost = IsTopmost(bar);
+        var beforeHost = TrackingNative.GetWindow(host, 3);
+        var beforeBar = beforeHost == bar ? TrackingNative.GetWindow(bar, 3) : 0;
+        var after = ResolveInsertAfter(bar, beforeHost, beforeBar, hostTopmost, barTopmost, IsTopmost(beforeHost), IsTopmost(beforeBar));
+        if (after is null) return;
+        TrackingNative.SetWindowPos(bar, after.Value, 0, 0, 0, 0, PlaceAboveFlags);
+        if (!hostTopmost && IsTopmost(bar))
+            TrackingNative.SetWindowPos(bar, HwndNoTopmost, 0, 0, 0, 0, PlaceAboveFlags);
     }
     internal static TrackingNative.Rect Place(TrackingNative.Rect host, TrackingNative.Rect work, double scale, double width, double height)
     {
@@ -236,7 +259,8 @@ internal sealed class WindowTracker : IDisposable
         disposed = true; recovery.Stop();
         foreach (var hook in hooks) if (hook != 0) TrackingNative.UnhookWinEvent(hook);
         source.RemoveHook(WindowMessage);
-        TrackingNative.SetWindowLongPtrW(bar.Handle, -8, 0);
+        if (bar.Handle != 0 && Native.IsWindow(bar.Handle))
+            TrackingNative.SetWindowLongPtrW(bar.Handle, -8, 0);
         Target = null;
         GC.KeepAlive(callback);
     }

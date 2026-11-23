@@ -85,6 +85,21 @@ internal static class BarIntegration
             Check("外框固定深灰不随状态变黄", ((SolidColorBrush)bar.MotionSurface.BorderBrush).Color == Color.FromRgb(52, 52, 58));
             Check("事件监听注册成功", tracker.HooksAvailable);
             Check("条窗非全局置顶且不激活", !bar.Topmost && (TrackingNative.GetWindowLongPtrW(handle, -20).ToInt64() & 0x08000008) == 0x08000000);
+            Window? topHi = null, topLo = null;
+            try
+            {
+                topHi = new Window { Left = -32000, Top = -32000, Width = 2, Height = 2, WindowStyle = WindowStyle.None, ShowInTaskbar = false, ShowActivated = false, AllowsTransparency = true, Background = Brushes.Transparent, Opacity = 0, Topmost = true };
+                topLo = new Window { Left = -32000, Top = -32000, Width = 2, Height = 2, WindowStyle = WindowStyle.None, ShowInTaskbar = false, ShowActivated = false, AllowsTransparency = true, Background = Brushes.Transparent, Opacity = 0, Topmost = true };
+                topHi.Show(); topLo.Show();
+                var hTopHi = new WindowInteropHelper(topHi).Handle;
+                var hTopLo = new WindowInteropHelper(topLo).Handle;
+                TrackingNative.SetWindowPos(hTopHi, WindowTracker.HwndTopmost, 0, 0, 0, 0, 0x13);
+                TrackingNative.SetWindowPos(hTopLo, hTopHi, 0, 0, 0, 0, 0x13);
+                TrackingNative.SetWindowPos(target, WindowTracker.HwndNoTopmost, 0, 0, 0, 0, 0x13);
+                WindowTracker.PlaceAbove(handle, target);
+                Check("多层置顶窗上方调用 PlaceAbove 后小条与宿主均保持非置顶", !WindowTracker.IsTopmost(handle) && !WindowTracker.IsTopmost(target));
+            }
+            finally { topLo?.Close(); topHi?.Close(); }
             Check("原生 owner 为目标而不是改宿主 parent", TrackingNative.GetWindow(handle, 4) == target);
             Check("鼠标激活消息不夺焦点", SendMessageW(handle, 0x21, target, 0) == 3);
             Check("未打开输入框时前缀不可用", !bar.ActionsEnabled);

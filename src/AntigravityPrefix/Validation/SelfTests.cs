@@ -157,6 +157,65 @@ internal static class SelfTests
                 }
             var tiny = WindowTracker.Place(new(-2000, -8, -1850, 900), new(-1920, 0, 0, 1040), 1.5, 304, 40);
             Check(tiny.Left >= -1920 && tiny.Top >= 0 && tiny.Right <= 0, "极窄和最大化边界不得把小条推到屏幕之外");
+            Check(WindowTracker.PlaceAboveFlags == 0x0213u, "PlaceAbove 必须包含 SWP_NOOWNERZORDER(0x0200)，防止重排小条扰动宿主层级");
+            const nint simBar = 1001, simTopPrev = 2001, simNormalPrev = 2002;
+            Check(WindowTracker.ResolveInsertAfter(simBar, simTopPrev, 0, false, false, true, false) == WindowTracker.HwndNoTopmost, "非置顶宿主前邻为置顶窗时，必须回落到 HWND_NOTOPMOST，不能进入置顶带");
+            Check(WindowTracker.ResolveInsertAfter(simBar, 0, 0, false, false, false, false) == WindowTracker.HwndNoTopmost, "非置顶宿主位于 Z 序最前(before=0)时，必须回落到 HWND_NOTOPMOST");
+            Check(WindowTracker.ResolveInsertAfter(simBar, simNormalPrev, 0, false, false, false, false) == simNormalPrev, "非置顶宿主前邻为普通窗口时，应插在其后");
+            Check(WindowTracker.ResolveInsertAfter(simBar, simBar, simNormalPrev, false, false, false, false) is null, "小条已紧贴非置顶宿主且均非置顶时，应跳过多余重排");
+            Check(WindowTracker.ResolveInsertAfter(simBar, simBar, simTopPrev, false, true, false, true) == WindowTracker.HwndNoTopmost, "小条误入置顶带且前邻置顶时，即使紧邻宿主也不得跳过，必须降回 HWND_NOTOPMOST");
+            Check(WindowTracker.ResolveInsertAfter(simBar, simBar, simNormalPrev, false, true, false, false) == simNormalPrev, "小条误入置顶带且前邻为普通窗口时，应降回该普通窗口之后");
+            Check(WindowTracker.ResolveInsertAfter(simBar, simBar, simTopPrev, true, true, true, true) is null, "置顶宿主与置顶小条相邻时应跳过重排");
+            Check(WindowTracker.ResolveInsertAfter(simBar, 0, 0, true, false, false, false) == WindowTracker.HwndTopmost, "置顶宿主前邻为空时小条使用 HWND_TOPMOST");
+            Check(WindowTracker.ResolveInsertAfter(simBar, simTopPrev, 0, true, false, true, false) == simTopPrev, "置顶宿主有前邻时小条插入该前邻之后");
+            var app = System.Windows.Application.Current;
+            var originalShutdownMode = app.ShutdownMode;
+            app.ShutdownMode = System.Windows.ShutdownMode.OnExplicitShutdown;
+            System.Windows.Window? topHi = null, topLo = null, hostWin = null, barWin = null;
+            nint hBar = 0;
+            try
+            {
+                System.Windows.Window OffscreenWin(bool topmost) => new()
+                {
+                    Left = -32000,
+                    Top = -32000,
+                    Width = 2,
+                    Height = 2,
+                    WindowStyle = System.Windows.WindowStyle.None,
+                    ShowInTaskbar = false,
+                    ShowActivated = false,
+                    AllowsTransparency = true,
+                    Background = System.Windows.Media.Brushes.Transparent,
+                    Opacity = 0,
+                    Topmost = topmost
+                };
+                topHi = OffscreenWin(true);
+                topLo = OffscreenWin(true);
+                hostWin = OffscreenWin(false);
+                barWin = OffscreenWin(false);
+                topHi.Show(); topLo.Show(); hostWin.Show(); barWin.Show();
+                var hTopHi = new System.Windows.Interop.WindowInteropHelper(topHi).Handle;
+                var hTopLo = new System.Windows.Interop.WindowInteropHelper(topLo).Handle;
+                var hHost = new System.Windows.Interop.WindowInteropHelper(hostWin).Handle;
+                hBar = new System.Windows.Interop.WindowInteropHelper(barWin).Handle;
+                TrackingNative.SetWindowPos(hTopHi, WindowTracker.HwndTopmost, 0, 0, 0, 0, 0x13);
+                TrackingNative.SetWindowPos(hTopLo, hTopHi, 0, 0, 0, 0, 0x13);
+                TrackingNative.SetWindowLongPtrW(hBar, -20, (nint)((TrackingNative.GetWindowLongPtrW(hBar, -20).ToInt64() & ~0x00040000L) | 0x08000080L));
+                TrackingNative.SetWindowLongPtrW(hBar, -8, hHost);
+                TrackingNative.SetWindowPos(hHost, WindowTracker.HwndNoTopmost, 0, 0, 0, 0, 0x13);
+                WindowTracker.PlaceAbove(hBar, hHost);
+                Check(!WindowTracker.IsTopmost(hBar) && !WindowTracker.IsTopmost(hHost), "真实 HWND 在非置顶宿主与多层置顶窗之间调用 PlaceAbove 不得产生 WS_EX_TOPMOST");
+                TrackingNative.SetWindowPos(hBar, WindowTracker.HwndTopmost, 0, 0, 0, 0, 0x13);
+                Check(WindowTracker.IsTopmost(hBar), "破坏前置条件：先将小条强制置顶以验证自愈能力");
+                WindowTracker.PlaceAbove(hBar, hHost);
+                Check(!WindowTracker.IsTopmost(hBar) && !WindowTracker.IsTopmost(hHost), "小条误带 WS_EX_TOPMOST 时 PlaceAbove 必须将其降回非置顶层且不污染宿主");
+            }
+            finally
+            {
+                if (hBar != 0 && Native.IsWindow(hBar)) TrackingNative.SetWindowLongPtrW(hBar, -8, 0);
+                barWin?.Close(); hostWin?.Close(); topLo?.Close(); topHi?.Close();
+                app.ShutdownMode = originalShutdownMode;
+            }
             report.AppendLine($"通过：{count} 项规则、身份隔离、UTF-8、彩色字形、置顶样式及 Windows 图标测试。");
             report.AppendLine("真实 Antigravity 重命名框：未直接操作。独立桌面端到端结果另见验收记录。");
         }
