@@ -74,5 +74,19 @@ internal static class CompatibilityValidation
         check(!Recognition.IsSameBinding(inlineExpected, inlineExpected with { ScopeId = "inline-node-2" }), "重命名输入框重建后不能复用原绑定");
         check(!Recognition.IsSameBinding(inlineExpected, inlineExpected with { OriginalValue = "用户已修改" }), "原始内容变化后必须拒绝写入");
         check(!Recognition.IsSameBinding(inlineExpected, inlineExpected with { InlineCommit = false }), "提交机制不同步时不能复用原绑定");
+
+        check(Recognition.IsConversationTitleButton("Conversation: Converting Codex Plugin", true, true, false), "顶栏会话标题按钮应识别为直点重命名入口");
+        check(Recognition.IsConversationTitleButton("conversation: sample", true, true, false), "顶栏会话标题前缀应忽略大小写");
+        check(Recognition.IsConversationTitleButton("会话: 测试", true, true, false) && Recognition.IsConversationTitleButton("会话：测试", true, true, false), "顶栏中文会话标题前缀应识别");
+        foreach (var badTitleBtn in new string?[] { null, "", "u1b", "Project: u1b", "More actions" })
+            check(!Recognition.IsConversationTitleButton(badTitleBtn, true, true, false), "项目面包屑及其他按钮绝不能误判为会话标题入口");
+        check(!Recognition.IsConversationTitleButton("Conversation: test", false, true, false), "不支持 Invoke 的标题节点必须拒绝");
+        check(!Recognition.IsConversationTitleButton("Conversation: test", true, false, false), "不在 Breadcrumb 内的标题节点必须拒绝");
+        check(!Recognition.IsConversationTitleButton("Conversation: test", true, true, true), "排除区域内的标题节点必须拒绝");
+
+        check(Recognition.PlanInlineCommit(true, false) == Recognition.InlineCommitPlan.DirectForegroundEnter, "宿主在前台且输入框打开时应直接前台回车");
+        check(Recognition.PlanInlineCommit(false, true) == Recognition.InlineCommitPlan.AlreadyClosedOnBlur, "失焦后输入框已自动关闭应直接确认提交");
+        check(Recognition.PlanInlineCommit(true, true) == Recognition.InlineCommitPlan.AlreadyClosedOnBlur, "输入框已关闭时应直接确认提交");
+        check(Recognition.PlanInlineCommit(false, false) == Recognition.InlineCommitPlan.BackgroundThenBorrowFocus, "宿主在后台且输入框仍打开时应先发后台消息再借焦点提交");
     }
 }

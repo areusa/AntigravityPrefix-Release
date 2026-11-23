@@ -39,15 +39,15 @@ public sealed partial class AntigravityBridge
     HashSet<string>? openDialogEvidence;
     bool lastOpenHadDialog;
     internal static bool IsTransientOpenError(Exception ex) => ex is ElementNotAvailableException || ex is COMException { HResult: unchecked((int)0x80040201) };
-    Scope? FindOpenEditor(nint hwnd)
+    Scope? FindOpenEditor(nint hwnd, AutomationElement? knownMainDoc = null, string? knownMainDocId = null)
     {
         var evidence = new HashSet<string>();
         openDialogEvidence = evidence;
         try
         {
             // 与常规识别使用同样的焦点祖先校验；全局局部扫描不能替代已证实的原生焦点范围。
-            var focused = FocusedScope(hwnd);
-            var scopes = FindScopes(hwnd);
+            var focused = FocusedScope(hwnd, knownMainDocId);
+            var scopes = FindScopes(hwnd, knownMainDoc, knownMainDocId);
             if (focused is not null) scopes.Add(focused);
             scopes = scopes.GroupBy(scope => scope.Binding.Key).Select(group => group.First()).ToList();
             if (scopes.Count > 1 || evidence.Count > 1) throw new OpenRenameBlockedException("MULTIPLE_EDITORS", "存在多个重命名范围，拒绝猜测。");
@@ -115,19 +115,24 @@ public sealed partial class AntigravityBridge
                 stopDocuments: true, pruneContent: true, stopAt: pruneSidebar ? IsAntigravitySidebarNode : null);
             CollectRenameItems(slice.Elements, docBoundary);
         }
-        var shallow = Slice(mainDoc, 140, 250, 4, stopDocuments: true, pruneContent: true,
-            stopAt: node => IsAntigravitySidebarNode(node) || IsAntigravityBreadcrumbNode(node));
-        foreach (var overlay in shallow.Elements)
-        {
-            if (!Visible(overlay)) continue;
-            var ct = overlay.Properties.ControlType.ValueOrDefault;
-            if (ct != ControlType.Menu && AriaRole(overlay) != "menu" && !Recognition.HasCssToken(Class(overlay), "agy-overlay")) continue;
-            var menuSlice = Slice(overlay, 60, 200, 5, stopDocuments: true, pruneContent: false);
-            CollectRenameItems(menuSlice.Elements, mainDoc);
-        }
+        var regions = FindShellRegions(mainDoc, hwnd);
+        foreach (var overlay in regions.Overlays)
+            CollectRenameItems(overlay.FindAll(TreeScope.Descendants, automation.ConditionFactory.ByControlType(ControlType.MenuItem)), mainDoc);
         if (found.Count == 0) ScanMenuRoot(mainDoc, mainDoc, true);
         foreach (var popupRoot in RelatedRoots(hwnd).Skip(1))
             ScanMenuRoot(popupRoot, null, false);
+        return found.GroupBy(Id).Select(g => g.First()).ToList();
+    }
+    List<AutomationElement> FindConversationTitleButtons(AutomationElement breadcrumb)
+    {
+        var found = new List<AutomationElement>();
+        var buttons = breadcrumb.FindAll(TreeScope.Descendants, automation.ConditionFactory.ByControlType(ControlType.Button));
+        foreach (var button in buttons)
+        {
+            if (!Visible(button) || !button.Properties.IsEnabled.ValueOrDefault) continue;
+            if (!Recognition.IsConversationTitleButton(Name(button), button.Patterns.Invoke.IsSupported, true, false)) continue;
+            found.Add(button);
+        }
         return found.GroupBy(Id).Select(g => g.First()).ToList();
     }
     static bool TryBounds(AutomationElement node, out double left, out double top, out double width, out double height)
@@ -198,71 +203,66 @@ public sealed partial class AntigravityBridge
         Trace("开始；尚未触发打开动作。");
         try
         {
-            nint hwnd = ResolveWindow();
-            if (hwnd == 0 && !TrackingMode && demoWindow == 0)
-            {
-                var candidates = WindowTracker.Candidates(h => WindowIdentity.Read(h)).Where(h => !Native.IsIconic(h) && !TrackingNative.Cloaked(h)).ToList();
-                if (candidates.Count == 1) hwnd = candidates[0];
-            }
-            if (hwnd == 0) throw new OpenRenameBlockedException("WINDOW_UNPROVEN", "没有唯一且经过核验的目标窗口；请先激活目标 Antigravity。");
-            var identity = WindowIdentity.Read(hwnd, demoWindow == 0) ?? throw new OpenRenameBlockedException("IDENTITY_LOST", "目标进程身份读取失败。");
-            cancellation.ThrowIfCancellationRequested();
-            if (!Native.BelongsToWindow(Native.GetForegroundWindow(), hwnd))
-            {
-                Native.SetForegroundWindow(hwnd);
-                var activation = Stopwatch.StartNew();
-                while (!Native.BelongsToWindow(Native.GetForegroundWindow(), hwnd) && activation.ElapsedMilliseconds < 400)
-                {
-                    cancellation.ThrowIfCancellationRequested();
-                    if (!identity.IsCurrent()) break;
-                    Thread.Sleep(20);
-                }
-            }
-            void Validate()
-            {
-                cancellation.ThrowIfCancellationRequested();
-                if (!identity.IsCurrent())
-                    throw new OpenRenameBlockedException("WINDOW_CHANGED", "目标窗口句柄或进程身份已变化，未继续操作。");
-                if (!Native.BelongsToWindow(Native.GetForegroundWindow(), hwnd))
-                    throw new OpenRenameBlockedException("WINDOW_CHANGED", "目标窗口身份仍有效，但前台归属已变化，未继续操作。");
-            }
-            if (!Native.BelongsToWindow(Native.GetForegroundWindow(), hwnd)) throw new OpenRenameBlockedException("FOREGROUND_BLOCKED", "Windows 未允许目标窗口取得前台，未继续操作。");
-            lastWindow = hwnd;
-            stage = "核验已有重命名框";
-            Scope? ReadEditor(string phase, int attempt)
-            {
-                if (demoWindow != 0) DemoOpenProbe?.Invoke(phase, attempt);
-                var editor = FindOpenEditor(hwnd);
-                Validate();
-                return editor;
-            }
-            Scope? existing;
-            var preflight = Stopwatch.StartNew();
-            int attempt = 0;
-            while (true)
-            {
-                Validate();
-                try
-                {
-                    existing = ReadEditor(demoWindow != 0 ? "发送前" : "触发前", ++attempt);
-                    if (existing is not null || !lastOpenHadDialog) break;
-                    if (preflight.ElapsedMilliseconds >= 2000) throw new OpenRenameBlockedException("EDITOR_STABILIZING_TIMEOUT", "已有重命名范围尚不完整或存在歧义，未继续打开。") { RecoveryTarget = identity, RequestId = requestId };
-                    progress?.Invoke(new(StatusKind.Processing, "已有输入框尚未就绪，正在确认…"));
-                    if (cancellation.WaitHandle.WaitOne(100)) cancellation.ThrowIfCancellationRequested();
-                }
-                catch (Exception ex) when (IsTransientOpenError(ex))
-                {
-                    cached = null;
-                    Trace($"瞬态控件失效;尝试={attempt};HResult=0x{ex.HResult:X8};重新获取原生控件。");
-                    if (preflight.ElapsedMilliseconds >= 2000) throw new OpenRenameBlockedException("EDITOR_STABILIZING_TIMEOUT", "触发前界面持续重建，未继续打开。") { RecoveryTarget = identity, RequestId = requestId };
-                    progress?.Invoke(new(StatusKind.Processing, "原生界面正在更新，等待稳定…"));
-                    if (cancellation.WaitHandle.WaitOne(100)) cancellation.ThrowIfCancellationRequested();
-                }
-            }
-            if (existing is not null) { cached = existing; return new(cached.Binding, referenceTitle, new(StatusKind.Ready, "已识别重命名框，可选择前缀")); }
-
             if (demoWindow != 0)
             {
+                nint hwnd = ResolveWindow();
+                if (hwnd == 0) throw new OpenRenameBlockedException("WINDOW_UNPROVEN", "没有唯一且经过核验的目标窗口；请先激活目标 Antigravity。");
+                var identity = WindowIdentity.Read(hwnd, false) ?? throw new OpenRenameBlockedException("IDENTITY_LOST", "目标进程身份读取失败。");
+                cancellation.ThrowIfCancellationRequested();
+                if (!Native.BelongsToWindow(Native.GetForegroundWindow(), hwnd))
+                {
+                    Native.SetForegroundWindow(hwnd);
+                    var activation = Stopwatch.StartNew();
+                    while (!Native.BelongsToWindow(Native.GetForegroundWindow(), hwnd) && activation.ElapsedMilliseconds < 400)
+                    {
+                        cancellation.ThrowIfCancellationRequested();
+                        if (!identity.IsCurrent()) break;
+                        Thread.Sleep(20);
+                    }
+                }
+                void Validate()
+                {
+                    cancellation.ThrowIfCancellationRequested();
+                    if (!identity.IsCurrent())
+                        throw new OpenRenameBlockedException("WINDOW_CHANGED", "目标窗口句柄或进程身份已变化，未继续操作。");
+                    if (!Native.BelongsToWindow(Native.GetForegroundWindow(), hwnd))
+                        throw new OpenRenameBlockedException("WINDOW_CHANGED", "目标窗口身份仍有效，但前台归属已变化，未继续操作。");
+                }
+                if (!Native.BelongsToWindow(Native.GetForegroundWindow(), hwnd)) throw new OpenRenameBlockedException("FOREGROUND_BLOCKED", "Windows 未允许目标窗口取得前台，未继续操作。");
+                lastWindow = hwnd;
+                stage = "核验已有重命名框";
+                Scope? ReadEditor(string phase, int attempt)
+                {
+                    DemoOpenProbe?.Invoke(phase, attempt);
+                    var editor = FindOpenEditor(hwnd);
+                    Validate();
+                    return editor;
+                }
+                Scope? existing;
+                var preflight = Stopwatch.StartNew();
+                int attempt = 0;
+                while (true)
+                {
+                    Validate();
+                    try
+                    {
+                        existing = ReadEditor("发送前", ++attempt);
+                        if (existing is not null || !lastOpenHadDialog) break;
+                        if (preflight.ElapsedMilliseconds >= 2000) throw new OpenRenameBlockedException("EDITOR_STABILIZING_TIMEOUT", "已有重命名范围尚不完整或存在歧义，未继续打开。") { RecoveryTarget = identity, RequestId = requestId };
+                        progress?.Invoke(new(StatusKind.Processing, "已有输入框尚未就绪，正在确认…"));
+                        if (cancellation.WaitHandle.WaitOne(100)) cancellation.ThrowIfCancellationRequested();
+                    }
+                    catch (Exception ex) when (IsTransientOpenError(ex))
+                    {
+                        cached = null;
+                        Trace($"瞬态控件失效;尝试={attempt};HResult=0x{ex.HResult:X8};重新获取原生控件。");
+                        if (preflight.ElapsedMilliseconds >= 2000) throw new OpenRenameBlockedException("EDITOR_STABILIZING_TIMEOUT", "触发前界面持续重建，未继续打开。") { RecoveryTarget = identity, RequestId = requestId };
+                        progress?.Invoke(new(StatusKind.Processing, "原生界面正在更新，等待稳定…"));
+                        if (cancellation.WaitHandle.WaitOne(100)) cancellation.ThrowIfCancellationRequested();
+                    }
+                }
+                if (existing is not null) { cached = existing; return new(cached.Binding, referenceTitle, new(StatusKind.Ready, "已识别重命名框，可选择前缀")); }
+
                 stage = "触发测试夹具默认重命名入口";
                 Validate();
                 if (!RenameKeys.DemoShortcutKeysReleased()) throw new OpenRenameBlockedException("MODIFIERS_HELD", "检测到修饰键或 R 键尚未松开，未注入按键。");
@@ -299,49 +299,170 @@ public sealed partial class AntigravityBridge
                 throw new OpenRenameBlockedException("EDITOR_NOT_CONFIRMED", "已完成输入框就绪等待，暂未确认；将只读检查晚到弹窗，不补发触发或写入。") { RecoveryTarget = identity, RequestId = requestId };
             }
 
+            nint realHwnd = ResolveWindow();
+            if (realHwnd == 0 && TrackingMode && TrackedTarget is { } tracked && tracked.IsCurrent()
+                && Native.IsWindowVisible(tracked.Handle) && !Native.IsIconic(tracked.Handle) && !TrackingNative.Cloaked(tracked.Handle))
+                realHwnd = tracked.Handle;
+            if (realHwnd == 0 && !TrackingMode)
+            {
+                var candidates = WindowTracker.Candidates(h => WindowIdentity.Read(h)).Where(h => !Native.IsIconic(h) && !TrackingNative.Cloaked(h)).ToList();
+                if (candidates.Count == 1) realHwnd = candidates[0];
+            }
+            if (realHwnd == 0) throw new OpenRenameBlockedException("WINDOW_UNPROVEN", "没有唯一且经过核验的目标窗口；请先激活目标 Antigravity。");
+            var realIdentity = WindowIdentity.Read(realHwnd, true) ?? throw new OpenRenameBlockedException("IDENTITY_LOST", "目标进程身份读取失败。");
+            cancellation.ThrowIfCancellationRequested();
+            if (!Native.BelongsToWindow(Native.GetForegroundWindow(), realHwnd))
+                Native.SetForegroundWindow(realHwnd);
+            void ValidateReal()
+            {
+                cancellation.ThrowIfCancellationRequested();
+                if (!realIdentity.IsCurrent())
+                    throw new OpenRenameBlockedException("WINDOW_CHANGED", "目标窗口句柄或进程身份已变化，未继续操作。");
+            }
+            lastWindow = realHwnd;
+
             stage = "定位唯一 Antigravity 主文档";
             AutomationElement? mainDoc = null;
             var docWait = Stopwatch.StartNew();
-            while (docWait.ElapsedMilliseconds < 2000)
+            while (docWait.ElapsedMilliseconds < 1500)
             {
-                Validate();
-                try { mainDoc = MainDocument(automation.FromHandle(hwnd), hwnd); if (mainDoc is not null) break; }
-                catch (Exception ex) when (IsTransientOpenError(ex)) { Trace($"主文档瞬态失效;HResult=0x{ex.HResult:X8}"); }
-                if (cancellation.WaitHandle.WaitOne(120)) cancellation.ThrowIfCancellationRequested();
+                ValidateReal();
+                try { mainDoc = ResolveMainDocument(realHwnd, forceRefresh: docWait.ElapsedMilliseconds > 0); if (mainDoc is not null) break; }
+                catch (Exception ex) when (IsTransientOpenError(ex)) { cachedMainDoc = null; Trace($"主文档瞬态失效;HResult=0x{ex.HResult:X8}"); }
+                if (cancellation.WaitHandle.WaitOne(80)) cancellation.ThrowIfCancellationRequested();
             }
-            if (mainDoc is null) throw new OpenRenameBlockedException("MAIN_DOCUMENT_UNPROVEN", "未能确认唯一 Antigravity 主界面文档，已停止。") { RecoveryTarget = identity, RequestId = requestId };
+            if (mainDoc is null) throw new OpenRenameBlockedException("MAIN_DOCUMENT_UNPROVEN", "未能确认唯一 Antigravity 主界面文档，已停止。") { RecoveryTarget = realIdentity, RequestId = requestId };
+            string mainDocId = Id(mainDoc);
 
-            stage = "定位当前会话 More actions 入口";
-            Validate();
-            var shellSlice = Slice(mainDoc, 140, 400, 4, stopDocuments: true, pruneContent: true, stopAt: node => IsAntigravitySidebarNode(node) || IsAntigravityBreadcrumbNode(node));
-            var breadcrumbs = shellSlice.Elements
-                .Where(node => Visible(node) && IsAntigravityBreadcrumbNode(node))
-                .GroupBy(Id).Select(g => g.First()).ToList();
+            stage = "核验已有重命名框";
+            Scope? realExisting;
+            var realPreflight = Stopwatch.StartNew();
+            int realAttempt = 0;
+            while (true)
+            {
+                ValidateReal();
+                try
+                {
+                    realExisting = FindOpenEditor(realHwnd, mainDoc, mainDocId);
+                    ValidateReal();
+                    if (realExisting is not null || !lastOpenHadDialog) break;
+                    if (realPreflight.ElapsedMilliseconds >= 1500) throw new OpenRenameBlockedException("EDITOR_STABILIZING_TIMEOUT", "已有重命名范围尚不完整或存在歧义，未继续打开。") { RecoveryTarget = realIdentity, RequestId = requestId };
+                    progress?.Invoke(new(StatusKind.Processing, "已有输入框尚未就绪，正在确认…"));
+                    if (cancellation.WaitHandle.WaitOne(80)) cancellation.ThrowIfCancellationRequested();
+                }
+                catch (Exception ex) when (IsTransientOpenError(ex))
+                {
+                    cached = null;
+                    ++realAttempt;
+                    Trace($"瞬态控件失效;尝试={realAttempt};HResult=0x{ex.HResult:X8};重新获取原生控件。");
+                    if (realPreflight.ElapsedMilliseconds >= 1500) throw new OpenRenameBlockedException("EDITOR_STABILIZING_TIMEOUT", "触发前界面持续重建，未继续打开。") { RecoveryTarget = realIdentity, RequestId = requestId };
+                    progress?.Invoke(new(StatusKind.Processing, "原生界面正在更新，等待稳定…"));
+                    if (cancellation.WaitHandle.WaitOne(80)) cancellation.ThrowIfCancellationRequested();
+                }
+            }
+            if (realExisting is not null) { cached = realExisting; return new(cached.Binding, referenceTitle, new(StatusKind.Ready, "已识别重命名框，可选择前缀")); }
+
+            Scope CompleteRealOpen(Scope editor, string mode)
+            {
+                ValidateReal();
+                cached = editor;
+                log.Write("打开重命名", $"已绑定唯一且语义明确的 Antigravity 内联重命名输入框({mode})；未写入任何名称。");
+                Trace($"确认成功({mode});总耗时={elapsed.ElapsedMilliseconds}ms。");
+                return editor;
+            }
+
+            stage = "定位当前会话顶部导航";
+            ValidateReal();
+            var breadcrumbs = FindShellRegions(mainDoc, realHwnd).Breadcrumbs;
             if (breadcrumbs.Count > 1)
             {
                 log.Write("打开重命名诊断", $"Breadcrumb数量={breadcrumbs.Count};拒绝猜测多会话分屏。");
-                throw new OpenRenameBlockedException("MENU_BUTTON_AMBIGUOUS", "存在多个会话顶部导航（如分屏视图），拒绝猜测。") { RecoveryTarget = identity, RequestId = requestId };
+                throw new OpenRenameBlockedException("MENU_BUTTON_AMBIGUOUS", "存在多个会话顶部导航（如分屏视图），拒绝猜测。") { RecoveryTarget = realIdentity, RequestId = requestId };
             }
             if (breadcrumbs.Count == 0)
             {
                 log.Write("打开重命名诊断", "Breadcrumb数量=0;未检测到会话顶部导航。");
-                throw new OpenRenameBlockedException("MENU_BUTTON_UNPROVEN", "未找到当前会话顶部导航或 More actions 按钮；请确认已打开具体会话。") { RecoveryTarget = identity, RequestId = requestId };
+                throw new OpenRenameBlockedException("MENU_BUTTON_UNPROVEN", "未找到当前会话顶部导航或 More actions 按钮；请确认已打开具体会话。") { RecoveryTarget = realIdentity, RequestId = requestId };
             }
-            var moreButtons = FindConversationMoreActions(mainDoc, breadcrumbs[0]);
+            var breadcrumb = breadcrumbs[0];
+
+            var titleButtons = FindConversationTitleButtons(breadcrumb);
+            if (titleButtons.Count == 1)
+            {
+                stage = "直接点击顶部会话标题入口";
+                ValidateReal();
+                bool invokedDirect = false;
+                try
+                {
+                    titleButtons[0].Patterns.Invoke.Pattern.Invoke();
+                    invokedDirect = true;
+                    log.Write("打开重命名", "已直接触发顶部会话标题编辑入口；等待内联输入框。");
+                    Trace("直接点击会话标题已触发。");
+                }
+                catch (Exception ex) when (IsTransientOpenError(ex))
+                {
+                    Trace($"顶部标题点击瞬态失效;HResult=0x{ex.HResult:X8};回退菜单打开。");
+                }
+                if (invokedDirect)
+                {
+                    stage = "确认顶部标题内联输入框已打开";
+                    var directWait = Stopwatch.StartNew();
+                    while (directWait.ElapsedMilliseconds < 500)
+                    {
+                        ValidateReal();
+                        try
+                        {
+                            var candidates = new List<Scope>();
+                            var focused = FocusedScope(realHwnd, mainDocId);
+                            if (focused is not null) candidates.Add(focused);
+                            candidates.AddRange(FindInlineEditorsInSubtree(breadcrumb, realHwnd, mainDoc, mainDocId));
+                            var distinct = candidates.GroupBy(s => s.Binding.Key).Select(g => g.First()).ToList();
+                            if (distinct.Count > 1) throw new OpenRenameBlockedException("MULTIPLE_EDITORS", "存在多个重命名范围，拒绝猜测。");
+                            if (distinct.Count == 1)
+                            {
+                                var foundEditor = distinct[0];
+                                if (blocked.ContainsKey(foundEditor.Binding.Key))
+                                    throw new OpenRenameBlockedException("EDITOR_BLOCKED", "已有未确认事务，必须关闭原输入框后重开，不能经打开入口解除封锁。");
+                                return new(CompleteRealOpen(foundEditor, "直点标题").Binding, referenceTitle, new(StatusKind.Ready, "已识别重命名框，可选择前缀"));
+                            }
+                        }
+                        catch (OpenRenameBlockedException) { throw; }
+                        catch (Exception ex) when (IsTransientOpenError(ex))
+                        {
+                            cached = null;
+                            Trace($"直点后瞬态失效;HResult=0x{ex.HResult:X8}");
+                        }
+                        if (cancellation.WaitHandle.WaitOne(20)) cancellation.ThrowIfCancellationRequested();
+                    }
+                    Trace($"直点标题在 {directWait.ElapsedMilliseconds}ms 内未弹出输入框，回退 More actions 菜单。");
+                }
+            }
+
+            try
+            {
+                var lateEditor = FindOpenEditor(realHwnd, mainDoc, mainDocId);
+                if (lateEditor is not null)
+                    return new(CompleteRealOpen(lateEditor, "直点晚到").Binding, referenceTitle, new(StatusKind.Ready, "已识别重命名框，可选择前缀"));
+            }
+            catch (Exception ex) when (IsTransientOpenError(ex)) { cached = null; }
+
+            stage = "定位当前会话 More actions 入口";
+            ValidateReal();
+            var moreButtons = FindConversationMoreActions(mainDoc, breadcrumb);
             if (moreButtons.Count == 0)
             {
                 log.Write("打开重命名诊断", "Breadcrumb=1;头部MoreActions=0");
-                throw new OpenRenameBlockedException("MENU_BUTTON_UNPROVEN", "未找到当前会话右上角 More actions 按钮；请确认已打开具体会话。") { RecoveryTarget = identity, RequestId = requestId };
+                throw new OpenRenameBlockedException("MENU_BUTTON_UNPROVEN", "未找到当前会话右上角 More actions 按钮；请确认已打开具体会话。") { RecoveryTarget = realIdentity, RequestId = requestId };
             }
             if (moreButtons.Count > 1)
             {
                 log.Write("打开重命名诊断", $"Breadcrumb=1;头部MoreActions={moreButtons.Count}");
-                throw new OpenRenameBlockedException("MENU_BUTTON_AMBIGUOUS", "存在多个会话 More actions 按钮（如分屏视图），拒绝猜测。") { RecoveryTarget = identity, RequestId = requestId };
+                throw new OpenRenameBlockedException("MENU_BUTTON_AMBIGUOUS", "存在多个会话 More actions 按钮（如分屏视图），拒绝猜测。") { RecoveryTarget = realIdentity, RequestId = requestId };
             }
             var moreButton = moreButtons[0];
 
             stage = "展开 More actions 菜单";
-            Validate();
+            ValidateReal();
             if (moreButton.Patterns.ExpandCollapse.TryGetPattern(out var expandPattern))
             {
                 if (expandPattern.ExpandCollapseState.ValueOrDefault != ExpandCollapseState.Expanded)
@@ -367,21 +488,21 @@ public sealed partial class AntigravityBridge
             stage = "定位并点击 Rename 菜单项";
             bool triggeredRename = false;
             var menuWait = Stopwatch.StartNew();
-            while (menuWait.ElapsedMilliseconds < 2000)
+            while (menuWait.ElapsedMilliseconds < 1500)
             {
-                Validate();
+                ValidateReal();
                 try
                 {
-                    var items = FindRenameMenuItems(hwnd, mainDoc);
+                    var items = FindRenameMenuItems(realHwnd, mainDoc);
                     if (items.Count > 1)
                     {
                         TryCollapseMenu();
-                        throw new OpenRenameBlockedException("RENAME_COMMAND_AMBIGUOUS", "菜单中存在多个重命名项，拒绝猜测。") { RecoveryTarget = identity, RequestId = requestId };
+                        throw new OpenRenameBlockedException("RENAME_COMMAND_AMBIGUOUS", "菜单中存在多个重命名项，拒绝猜测。") { RecoveryTarget = realIdentity, RequestId = requestId };
                     }
                     if (items.Count == 1)
                     {
                         var renameItem = items[0];
-                        Validate();
+                        ValidateReal();
                         if (renameItem.Patterns.Invoke.TryGetPattern(out var invokePattern)) invokePattern.Invoke();
                         else renameItem.Patterns.LegacyIAccessible.Pattern.DoDefaultAction();
                         triggeredRename = true;
@@ -395,40 +516,34 @@ public sealed partial class AntigravityBridge
                 {
                     Trace($"菜单查找瞬态失效;HResult=0x{ex.HResult:X8};继续轮询，不重点击。");
                 }
-                if (cancellation.WaitHandle.WaitOne(80)) cancellation.ThrowIfCancellationRequested();
+                if (cancellation.WaitHandle.WaitOne(25)) cancellation.ThrowIfCancellationRequested();
             }
             if (!triggeredRename)
             {
                 TryCollapseMenu();
-                throw new OpenRenameBlockedException("RENAME_COMMAND_MISSING", "More actions 菜单中未找到 Rename 项。") { RecoveryTarget = identity, RequestId = requestId };
+                throw new OpenRenameBlockedException("RENAME_COMMAND_MISSING", "More actions 菜单中未找到 Rename 项。") { RecoveryTarget = realIdentity, RequestId = requestId };
             }
 
             stage = "确认内联重命名输入框已打开";
             var settle = Stopwatch.StartNew();
-            attempt = 0;
-            while (settle.ElapsedMilliseconds < 6000)
+            int settleAttempt = 0;
+            while (settle.ElapsedMilliseconds < 4000)
             {
-                Validate();
+                ValidateReal();
                 Scope? editor = null;
-                try { editor = ReadEditor("触发后", ++attempt); }
+                try { ++settleAttempt; editor = FindOpenEditor(realHwnd, mainDoc, mainDocId); ValidateReal(); }
                 catch (Exception ex) when (IsTransientOpenError(ex))
                 {
                     cached = null;
-                    Trace($"瞬态控件失效;尝试={attempt};HResult=0x{ex.HResult:X8};仅重新识别，不重新触发菜单。");
+                    Trace($"瞬态控件失效;尝试={settleAttempt};HResult=0x{ex.HResult:X8};仅重新识别，不重新触发菜单。");
                     progress?.Invoke(new(StatusKind.Processing, "界面正在打开输入框，等待就绪…"));
                 }
                 if (editor is not null)
-                {
-                    Validate();
-                    cached = editor;
-                    log.Write("打开重命名", "已绑定唯一且语义明确的 Antigravity 内联重命名输入框；未写入任何名称。");
-                    Trace($"确认成功;触发后等待={settle.ElapsedMilliseconds}ms;尝试={attempt}。");
-                    return new(cached.Binding, referenceTitle, new(StatusKind.Ready, "已识别重命名框，可选择前缀"));
-                }
-                if (cancellation.WaitHandle.WaitOne(100)) cancellation.ThrowIfCancellationRequested();
+                    return new(CompleteRealOpen(editor, "菜单回退").Binding, referenceTitle, new(StatusKind.Ready, "已识别重命名框，可选择前缀"));
+                if (cancellation.WaitHandle.WaitOne(25)) cancellation.ThrowIfCancellationRequested();
             }
             Trace($"等待上限到达;触发后等待={settle.ElapsedMilliseconds}ms;转入只读晚到检查。");
-            throw new OpenRenameBlockedException("EDITOR_NOT_CONFIRMED", "已完成输入框就绪等待，暂未确认；将只读检查晚到输入框，不重新触发或写入。") { RecoveryTarget = identity, RequestId = requestId };
+            throw new OpenRenameBlockedException("EDITOR_NOT_CONFIRMED", "已完成输入框就绪等待，暂未确认；将只读检查晚到输入框，不重新触发或写入。") { RecoveryTarget = realIdentity, RequestId = requestId };
         }
         catch (Exception ex)
         {

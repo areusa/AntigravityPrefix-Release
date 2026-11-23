@@ -54,6 +54,20 @@ public static class Recognition
         return SidePaneBoundaryLabels.Contains(trimmed, StringComparer.OrdinalIgnoreCase)
             || trimmed.StartsWith("Close ", StringComparison.OrdinalIgnoreCase);
     }
+    internal enum InlineCommitPlan { DirectForegroundEnter, AlreadyClosedOnBlur, BackgroundThenBorrowFocus }
+    internal static bool IsConversationTitleButton(string? name, bool hasInvoke, bool inBreadcrumb, bool inExcludedZone)
+    {
+        if (!inBreadcrumb || inExcludedZone || !hasInvoke) return false;
+        var trimmed = (name ?? "").Trim();
+        if (trimmed.Length == 0) return false;
+        return trimmed.StartsWith("Conversation:", StringComparison.OrdinalIgnoreCase)
+            || trimmed.StartsWith("会话:", StringComparison.Ordinal)
+            || trimmed.StartsWith("会话：", StringComparison.Ordinal);
+    }
+    internal static InlineCommitPlan PlanInlineCommit(bool hostIsForeground, bool editorAlreadyClosed) =>
+        editorAlreadyClosed ? InlineCommitPlan.AlreadyClosedOnBlur
+        : hostIsForeground ? InlineCommitPlan.DirectForegroundEnter
+        : InlineCommitPlan.BackgroundThenBorrowFocus;
     public static bool IsCurrentMarker(string? aria) => System.Text.RegularExpressions.Regex.IsMatch(aria ?? "", @"(?:^|[;,\s])(?:selected\s*[=:]\s*true|current\s*[=:]\s*(?:true|page))(?:$|[;,\s])", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
     // 不能使用泛化的“名称”或输入框文本推测重命名语义。
     static readonly string[] RenameLabels = ["Rename", "Rename chat", "Rename thread", "Rename conversation", "Edit title", "重命名", "重命名会话", "重命名聊天", "为聊天重命名", "修改聊天名称", "编辑标题"];

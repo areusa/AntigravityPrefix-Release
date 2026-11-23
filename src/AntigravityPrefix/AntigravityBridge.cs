@@ -25,7 +25,10 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
     internal Action? DemoBeforeProbe { get; set; }
     const string InlineSaveId = "inline:enter";
     sealed record Scope(AutomationElement Container, AutomationElement Editor, AutomationElement? Save, EditorBinding Binding, string? MainDocId = null);
+    sealed record CachedMainDoc(WindowIdentity Identity, AutomationElement Doc, string DocId);
+    sealed record ShellRegions(List<AutomationElement> Breadcrumbs, List<AutomationElement> Sidebars, List<AutomationElement> Dialogs, List<AutomationElement> Overlays);
     sealed record TreeSlice(List<AutomationElement> Elements, bool Complete, long Milliseconds);
+    CachedMainDoc? cachedMainDoc;
 
     nint ResolveWindow()
     {
@@ -35,7 +38,7 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
             if (demoWindow == 0 && WindowIdentity.Read(target.Handle) != target) return 0;
             var active = Native.GetForegroundWindow();
             if (active != OwnWindow && !Native.BelongsToWindow(active, target.Handle)) return 0;
-            if (lastWindow != target.Handle) { cached = null; referenceTitle = null; nextMetadata = DateTime.MinValue; }
+            if (lastWindow != target.Handle) { cached = null; cachedMainDoc = null; referenceTitle = null; nextMetadata = DateTime.MinValue; }
             return lastWindow = target.Handle;
         }
         if (demoWindow != 0) return Native.IsWindow(demoWindow) ? demoWindow : 0;
@@ -46,7 +49,7 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
         nint result = owner != 0 && IsAntigravity(owner) ? owner
             : foreground != 0 && IsAntigravity(foreground) ? foreground : 0;
         if (result == 0) return 0;
-        if (lastWindow != result) { cached = null; referenceTitle = null; nextMetadata = DateTime.MinValue; }
+        if (lastWindow != result) { cached = null; cachedMainDoc = null; referenceTitle = null; nextMetadata = DateTime.MinValue; }
         return lastWindow = result;
     }
     static bool IsAntigravity(nint hwnd)
@@ -291,7 +294,7 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
             string? expectedDocId = knownMainDocId ?? (knownMainDoc is not null ? Id(knownMainDoc) : null);
             if (expectedDocId is null)
             {
-                var mainDoc = MainDocument(automation.FromHandle(hwnd), hwnd);
+                var mainDoc = ResolveMainDocument(hwnd);
                 expectedDocId = mainDoc is null ? null : Id(mainDoc);
             }
             bool sameMainDoc = expectedDocId is not null && expectedDocId == foundDocId;
@@ -347,6 +350,27 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
         }
     }
     // Antigravity 同窗口含多个 RootWebArea；必须核验唯一主文档签名，不进入内置网页或长对话正文。
+    AutomationElement? ResolveMainDocument(nint hwnd, bool forceRefresh = false)
+    {
+        if (demoWindow != 0) return null;
+        var identity = WindowIdentity.Read(hwnd);
+        if (identity is null) { cachedMainDoc = null; return null; }
+        if (!forceRefresh && cachedMainDoc is { } hit && hit.Identity == identity)
+        {
+            try
+            {
+                if (hit.Doc.Properties.ControlType.ValueOrDefault == ControlType.Document
+                    && hit.Doc.Properties.ProcessId.ValueOrDefault == identity.ProcessId
+                    && Id(hit.Doc) == hit.DocId)
+                    return hit.Doc;
+            }
+            catch { }
+            cachedMainDoc = null;
+        }
+        var doc = MainDocument(automation.FromHandle(hwnd), hwnd);
+        cachedMainDoc = doc is null ? null : new(identity, doc, Id(doc));
+        return doc;
+    }
     AutomationElement? MainDocument(AutomationElement root, nint hwnd)
     {
         if (demoWindow != 0) return null;
@@ -367,16 +391,37 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
             return null;
         }
         var matched = new List<AutomationElement>();
+        var walker = automation.TreeWalkerFactory.GetControlViewWalker();
         foreach (var doc in documents)
         {
             if (!HasOwnedNativeRoot(doc, hwnd, pid)) continue;
-            var inner = Slice(doc, 90, 260, maxDepth: 3, stopDocuments: true, pruneContent: false);
-            bool hasStandaloneTheme = inner.Elements.Any(n => Recognition.HasCssToken(Class(n), "theme-standalone"));
+            AutomationElement? themeNode = null;
+            for (var child = walker.GetFirstChild(doc); child is not null; child = walker.GetNextSibling(child))
+            {
+                if (Recognition.HasCssToken(Class(child), "theme-standalone")) { themeNode = child; break; }
+            }
+            if (themeNode is null) continue;
+            var inner = Slice(themeNode, 48, 160, maxDepth: 2, stopDocuments: true, pruneContent: false,
+                stopAt: n => IsAntigravitySidebarNode(n) || IsAntigravityBreadcrumbNode(n));
             bool hasRootContainer = inner.Elements.Any(n => AutomationId(n) == "root");
             bool hasShellLandmark = inner.Elements.Any(n => IsAntigravitySidebarNode(n) || IsAntigravityBreadcrumbNode(n)
                 || (n.Properties.ControlType.ValueOrDefault == ControlType.Button && Recognition.HasCssToken(Class(n), "agy-button")));
-            if (Recognition.IsAntigravityMainShell(true, true, hasStandaloneTheme, hasRootContainer, hasShellLandmark))
+            if (Recognition.IsAntigravityMainShell(true, true, true, hasRootContainer, hasShellLandmark))
                 matched.Add(doc);
+        }
+        if (matched.Count == 0)
+        {
+            foreach (var doc in documents)
+            {
+                if (!HasOwnedNativeRoot(doc, hwnd, pid)) continue;
+                var inner = Slice(doc, 90, 260, maxDepth: 3, stopDocuments: true, pruneContent: false);
+                bool hasStandaloneTheme = inner.Elements.Any(n => Recognition.HasCssToken(Class(n), "theme-standalone"));
+                bool hasRootContainer = inner.Elements.Any(n => AutomationId(n) == "root");
+                bool hasShellLandmark = inner.Elements.Any(n => IsAntigravitySidebarNode(n) || IsAntigravityBreadcrumbNode(n)
+                    || (n.Properties.ControlType.ValueOrDefault == ControlType.Button && Recognition.HasCssToken(Class(n), "agy-button")));
+                if (Recognition.IsAntigravityMainShell(true, true, hasStandaloneTheme, hasRootContainer, hasShellLandmark))
+                    matched.Add(doc);
+            }
         }
         if (matched.Count != 1)
         {
@@ -385,7 +430,73 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
         }
         return matched[0];
     }
-    List<Scope> FindScopes(nint hwnd)
+    ShellRegions FindShellRegions(AutomationElement mainDoc, nint hwnd)
+    {
+        var breadcrumbs = new List<AutomationElement>();
+        var sidebars = new List<AutomationElement>();
+        var dialogs = new List<AutomationElement>();
+        var overlays = new List<AutomationElement>();
+        void Classify(AutomationElement node)
+        {
+            if (IsDialog(node, hwnd)) dialogs.Add(node);
+            if (IsAntigravityBreadcrumbNode(node)) breadcrumbs.Add(node);
+            if (IsAntigravitySidebarNode(node)) sidebars.Add(node);
+            if (Visible(node) && (node.Properties.ControlType.ValueOrDefault == ControlType.Menu
+                || AriaRole(node) == "menu"
+                || Recognition.HasCssToken(Class(node), "agy-overlay")))
+                overlays.Add(node);
+        }
+        var walker = automation.TreeWalkerFactory.GetControlViewWalker();
+        AutomationElement? themeNode = null;
+        for (var child = walker.GetFirstChild(mainDoc); child is not null; child = walker.GetNextSibling(child))
+        {
+            Classify(child);
+            if (themeNode is null && Recognition.HasCssToken(Class(child), "theme-standalone")) themeNode = child;
+        }
+        if (themeNode is not null)
+        {
+            AutomationElement? rootContainer = null;
+            for (var child = walker.GetFirstChild(themeNode); child is not null; child = walker.GetNextSibling(child))
+            {
+                Classify(child);
+                if (rootContainer is null && AutomationId(child) == "root") rootContainer = child;
+                else if (!IsDialog(child, hwnd) && !IsAntigravitySidebarNode(child) && !IsAntigravityBreadcrumbNode(child))
+                {
+                    for (var nested = walker.GetFirstChild(child); nested is not null; nested = walker.GetNextSibling(nested))
+                        Classify(nested);
+                }
+            }
+            if (rootContainer is not null)
+            {
+                for (var child = walker.GetFirstChild(rootContainer); child is not null; child = walker.GetNextSibling(child))
+                    Classify(child);
+            }
+        }
+        if (breadcrumbs.Count == 0 && sidebars.Count == 0)
+        {
+            breadcrumbs.Clear(); sidebars.Clear(); dialogs.Clear(); overlays.Clear();
+            var shell = Slice(mainDoc, 140, 320, maxDepth: 4, stopDocuments: true, pruneContent: true,
+                stopAt: node => IsAntigravitySidebarNode(node) || IsAntigravityBreadcrumbNode(node));
+            foreach (var node in shell.Elements) Classify(node);
+        }
+        return new(
+            breadcrumbs.GroupBy(Id).Select(g => g.First()).ToList(),
+            sidebars.GroupBy(Id).Select(g => g.First()).ToList(),
+            dialogs.GroupBy(Id).Select(g => g.First()).ToList(),
+            overlays.GroupBy(Id).Select(g => g.First()).ToList());
+    }
+    List<Scope> FindInlineEditorsInSubtree(AutomationElement container, nint hwnd, AutomationElement mainDoc, string mainDocId)
+    {
+        var found = new List<Scope>();
+        var edits = container.FindAll(TreeScope.Descendants, automation.ConditionFactory.ByControlType(ControlType.Edit));
+        foreach (var node in edits)
+        {
+            var inline = InspectInlineEditor(node, hwnd, mainDoc, mainDocId);
+            if (inline is not null) found.Add(inline);
+        }
+        return found;
+    }
+    List<Scope> FindScopes(nint hwnd, AutomationElement? knownMainDoc = null, string? knownMainDocId = null)
     {
         var found = new List<Scope>();
         if (demoWindow != 0)
@@ -415,34 +526,19 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
             }
             return found.GroupBy(x => x.Binding.Key).Select(x => x.First()).ToList();
         }
-        var mainDoc = MainDocument(automation.FromHandle(hwnd), hwnd);
+        var mainDoc = knownMainDoc ?? ResolveMainDocument(hwnd);
         if (mainDoc is null) return found;
-        var shell = Slice(mainDoc, 140, 320, maxDepth: 4, stopDocuments: true, pruneContent: true, stopAt: node => IsAntigravitySidebarNode(node) || IsAntigravityBreadcrumbNode(node));
-        foreach (var node in shell.Elements)
-            if (IsDialog(node, hwnd))
-            {
-                var scope = InspectDialog(node, hwnd);
-                if (scope is not null) found.Add(scope);
-            }
-        foreach (var breadcrumb in shell.Elements.Where(IsAntigravityBreadcrumbNode))
+        var mainDocId = knownMainDocId ?? Id(mainDoc);
+        var regions = FindShellRegions(mainDoc, hwnd);
+        foreach (var node in regions.Dialogs)
         {
-            var area = Slice(breadcrumb, 40, 200, maxDepth: 6, stopDocuments: true, pruneContent: false);
-            foreach (var node in area.Elements.Where(n => n.Properties.ControlType.ValueOrDefault == ControlType.Edit))
-            {
-                var inline = InspectInlineEditor(node, hwnd, mainDoc);
-                if (inline is not null) found.Add(inline);
-            }
+            var scope = InspectDialog(node, hwnd);
+            if (scope is not null) found.Add(scope);
         }
-        foreach (var sidebar in shell.Elements.Where(IsAntigravitySidebarNode))
-        {
-            var area = Slice(sidebar, 360, 550, maxDepth: 7, stopDocuments: true, pruneContent: false, stopAt: IsSidebarLeaf);
-            if (!area.Complete) log.Write("局部探测", "侧边栏受限读取已截断；只允许焦点直达既有输入框，不按列表推测。");
-            foreach (var node in area.Elements.Where(n => n.Properties.ControlType.ValueOrDefault == ControlType.Edit))
-            {
-                var inline = InspectInlineEditor(node, hwnd, mainDoc);
-                if (inline is not null) found.Add(inline);
-            }
-        }
+        foreach (var breadcrumb in regions.Breadcrumbs)
+            found.AddRange(FindInlineEditorsInSubtree(breadcrumb, hwnd, mainDoc, mainDocId));
+        foreach (var sidebar in regions.Sidebars)
+            found.AddRange(FindInlineEditorsInSubtree(sidebar, hwnd, mainDoc, mainDocId));
         return found.GroupBy(x => x.Binding.Key).Select(x => x.First()).ToList();
     }
 
@@ -451,15 +547,15 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
         if (DateTime.UtcNow < nextMetadata) return;
         nextMetadata = DateTime.UtcNow.AddSeconds(8);
         progress?.Invoke(new(StatusKind.Processing, "正在读取主会话…"));
-        var document = MainDocument(automation.FromHandle(hwnd), hwnd);
+        var document = ResolveMainDocument(hwnd);
         referenceTitle = document is null ? null : Name(document);
         log.Write("主会话", document is null ? "未取得唯一 Antigravity 主文档；真实会话 ID 未确认" : "已取得参考标题；无可信的当前会话 ID 来源，不进行标题映射");
         if (document is null) return;
         progress?.Invoke(new(StatusKind.Processing, "正在核对 Antigravity 结构…"));
-        var structure = Slice(document, 90, 300, maxDepth: 4, stopDocuments: true, pruneContent: true);
-        bool hasSidebar = structure.Elements.Any(IsAntigravitySidebarNode);
-        bool hasBreadcrumb = structure.Elements.Any(IsAntigravityBreadcrumbNode);
-        log.Write("主界面结构", $"节点={structure.Elements.Count}，完整={structure.Complete}，侧栏={hasSidebar}，顶部导航={hasBreadcrumb}；未暴露选中态标记，不按标题猜测");
+        var regions = FindShellRegions(document, hwnd);
+        bool hasSidebar = regions.Sidebars.Count > 0;
+        bool hasBreadcrumb = regions.Breadcrumbs.Count > 0;
+        log.Write("主界面结构", $"侧栏={hasSidebar}({regions.Sidebars.Count})，顶部导航={hasBreadcrumb}({regions.Breadcrumbs.Count})；未暴露选中态标记，不按标题猜测");
     }
     public ProbeResult Probe(Action<WorkStatus>? progress = null)
     {
@@ -474,10 +570,11 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
         Scope? candidate;
         try
         {
-            candidate = FocusedScope(hwnd);
+            var cachedDocId = cached?.MainDocId;
+            candidate = FocusedScope(hwnd, cachedDocId);
             if (candidate is null && cached is not null && cached.Binding.Window == hwnd)
             {
-                try { candidate = InspectScope(cached, hwnd); } catch { cached = null; }
+                try { candidate = InspectScope(cached, hwnd, cachedDocId); } catch { cached = null; }
             }
             if (candidate is null)
             {
@@ -490,6 +587,7 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
         catch (Exception ex) when (IsTransientOpenError(ex))
         {
             cached = null;
+            cachedMainDoc = null;
             log.Write("识别瞬态", $"探测期间控件重建(0x{ex.HResult:X8})，本轮跳过。");
             return new(null, referenceTitle, new(StatusKind.NeedsAction, "原生界面正在更新，请稍候…"));
         }
@@ -579,7 +677,7 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
         {
             try
             {
-                var scopes = FindScopes(expectedBinding.Window);
+                var scopes = FindScopes(expectedBinding.Window, knownMainDocId: knownMainDocId);
                 if (scopes.Count == 1 && Recognition.IsSameBinding(expectedBinding, scopes[0].Binding)) return scopes[0];
             }
             catch (Exception ex) when (IsTransientOpenError(ex))
@@ -589,21 +687,44 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
         }
         return null;
     }
+    bool IsTargetWindowValid(nint hwnd, int expectedProcessId)
+    {
+        if (hwnd == 0 || !Native.IsWindow(hwnd) || !Native.IsWindowVisible(hwnd) || Native.IsIconic(hwnd) || TrackingNative.Cloaked(hwnd)) return false;
+        if (demoWindow != 0)
+        {
+            Native.GetWindowThreadProcessId(hwnd, out var pid);
+            return hwnd == demoWindow && (int)pid == expectedProcessId;
+        }
+        return WindowIdentity.Read(hwnd) is { } id && (int)id.ProcessId == expectedProcessId;
+    }
     Scope Revalidate(EditorBinding expected)
     {
-        var resolved = ResolveWindowWithRetry();
-        if (resolved != expected.Window)
+        bool allowBackground = demoWindow == 0 && expected.InlineCommit;
+        if (allowBackground)
         {
-            log.Write("重命名核验失败", $"原因=窗口不匹配;expected=0x{expected.Window:X};resolved=0x{resolved:X};fg={DescribeWindow(Native.GetForegroundWindow())};own=0x{OwnWindow:X};last=0x{lastWindow:X};tracking={TrackingMode};cached={cached is not null}");
-            throw new InvalidOperationException("目标窗口已变化，请重新打开重命名框");
+            if (!IsTargetWindowValid(expected.Window, expected.ProcessId))
+            {
+                log.Write("重命名核验失败", $"原因=宿主窗口失效;expected=0x{expected.Window:X};fg={DescribeWindow(Native.GetForegroundWindow())};own=0x{OwnWindow:X};tracking={TrackingMode}");
+                throw new InvalidOperationException("目标窗口已变化或已最小化，请重新打开重命名框");
+            }
+        }
+        else
+        {
+            var resolved = ResolveWindowWithRetry();
+            if (resolved != expected.Window)
+            {
+                log.Write("重命名核验失败", $"原因=窗口不匹配;expected=0x{expected.Window:X};resolved=0x{resolved:X};fg={DescribeWindow(Native.GetForegroundWindow())};own=0x{OwnWindow:X};last=0x{lastWindow:X};tracking={TrackingMode};cached={cached is not null}");
+                throw new InvalidOperationException("目标窗口已变化，请重新打开重命名框");
+            }
         }
         Scope? ReadOnce(out bool sawTransient)
         {
             sawTransient = false;
             Scope? found = null;
+            var knownMainDocId = cached?.MainDocId;
             if (cached is not null)
             {
-                try { found = InspectScope(cached, expected.Window); }
+                try { found = InspectScope(cached, expected.Window, knownMainDocId); }
                 catch (Exception ex) when (IsTransientOpenError(ex))
                 {
                     cached = null;
@@ -612,12 +733,12 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
                 }
                 catch { cached = null; }
             }
-            if (found is null) found = FocusedScope(expected.Window);
+            if (found is null) found = FocusedScope(expected.Window, knownMainDocId);
             if (found is null)
             {
                 try
                 {
-                    var scopes = FindScopes(expected.Window);
+                    var scopes = FindScopes(expected.Window, knownMainDocId: knownMainDocId);
                     if (scopes.Count == 1) found = scopes[0];
                 }
                 catch (Exception ex) when (IsTransientOpenError(ex))
@@ -634,7 +755,7 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
         {
             current = ReadOnce(out bool sawTransient);
             if (current is not null || !sawTransient || watch.ElapsedMilliseconds >= 600) break;
-            Thread.Sleep(50);
+            Thread.Sleep(25);
         }
         if (current is null || !Recognition.IsSameBinding(expected, current.Binding))
         {
@@ -651,8 +772,10 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
     }
     internal RenameResult Rename(EditorBinding expected, string? icon, Action<WorkStatus> progress, CancellationToken cancellation = default, PrefixSnapshot? rules = null, Func<bool>? rulesCurrent = null)
     {
+        var totalWatch = Stopwatch.StartNew();
         progress(new(StatusKind.Processing, "正在核对输入框身份…"));
         var scope = Revalidate(expected);
+        long revalidateMs = totalWatch.ElapsedMilliseconds;
         rules ??= PrefixSnapshot.Default;
         if (rulesCurrent?.Invoke() == false) throw new InvalidOperationException("emoji 配置已经改变，本次未写入。");
         var newTitle = PrefixRules.Apply(expected.OriginalValue, icon, rules);
@@ -668,6 +791,7 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
         var knownMainDocId = scope.MainDocId;
         progress(new(StatusKind.Processing, "正在修改名称…"));
         log.Write("重命名", "已校验窗口、输入框及原始文本，开始写入");
+        var writeWatch = Stopwatch.StartNew();
         try
         {
             scope.Editor.Patterns.Value.Pattern.SetValue(newTitle);
@@ -682,14 +806,20 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
             () => TryInspectMatchingScope(scope, expectedAfter, knownMainDocId, "写入后核验"),
             candidate => candidate.Binding.InlineCommit || candidate.Save?.Properties.IsEnabled.ValueOrDefault == true,
             1500,
-            50,
+            25,
             cancellation,
             ex => log.Write("重命名瞬态", $"阶段=写入后核验;HResult=0x{ex.HResult:X8}"));
         if (updated is null || !Recognition.IsSameBinding(expectedAfter, updated.Binding))
             throw new InvalidOperationException("写入后内容或控件发生变化，未提交");
-        if (ResolveWindowWithRetry() != expected.Window) throw new InvalidOperationException("前台窗口已变化，未提交");
+        long writeMs = writeWatch.ElapsedMilliseconds;
+        bool validWindow = demoWindow == 0 && updated.Binding.InlineCommit
+            ? IsTargetWindowValid(expected.Window, expected.ProcessId)
+            : ResolveWindowWithRetry() == expected.Window;
+        if (!validWindow) throw new InvalidOperationException("目标窗口已变化，未提交");
         cancellation.ThrowIfCancellationRequested();
         if (rulesCurrent?.Invoke() == false) throw new InvalidOperationException("emoji 配置已经改变，本次未保存。");
+        var commitWatch = Stopwatch.StartNew();
+        string commitMethod = "对话框保存";
         if (!updated.Binding.InlineCommit)
         {
             if (updated.Save is null || !updated.Save.Properties.IsEnabled.ValueOrDefault)
@@ -699,47 +829,110 @@ public sealed partial class AntigravityBridge(nint demoWindow, LocalLog log) : I
         }
         else
         {
-            if (!Native.BelongsToWindow(Native.GetForegroundWindow(), expected.Window))
+            RenameResult CompleteSubmitted(string method)
             {
-                Native.SetForegroundWindow(expected.Window);
-                var fgWait = Stopwatch.StartNew();
-                while (!Native.BelongsToWindow(Native.GetForegroundWindow(), expected.Window) && fgWait.ElapsedMilliseconds < 300)
-                    Thread.Sleep(25);
-                if (!Native.BelongsToWindow(Native.GetForegroundWindow(), expected.Window))
-                    throw new InvalidOperationException("前台窗口未处于目标宿主，未发送回车提交");
+                log.Write("改名时序", $"校验={revalidateMs}ms;写入={writeMs}ms;提交={commitWatch.ElapsedMilliseconds}ms;总耗时={totalWatch.ElapsedMilliseconds}ms;方式={method}");
+                return Submitted(newTitle);
             }
-            if (!HasEditorFocus(updated.Editor, expectedAfter.EditorId))
+            bool WaitClosed(int timeoutMilliseconds)
             {
-                try { updated.Editor.Focus(); } catch { }
-                var focusWait = Stopwatch.StartNew();
-                while (!HasEditorFocus(updated.Editor, expectedAfter.EditorId) && focusWait.ElapsedMilliseconds < 250)
-                    Thread.Sleep(35);
+                var closeWait = Stopwatch.StartNew();
+                while (true)
+                {
+                    if (HasClosed(updated.Container) || HasClosed(updated.Editor)) return true;
+                    if (closeWait.ElapsedMilliseconds >= timeoutMilliseconds) return false;
+                    Thread.Sleep(20);
+                }
             }
-            var focusedCheck = PollTransient(
-                () => TryInspectMatchingScope(updated, expectedAfter, knownMainDocId, "提交前核验"),
-                candidate => HasEditorFocus(candidate.Editor, expectedAfter.EditorId),
-                600,
-                45,
-                cancellation,
-                ex => log.Write("重命名瞬态", $"阶段=提交前核验;HResult=0x{ex.HResult:X8}"));
-            if (focusedCheck is null || !Recognition.IsSameBinding(expectedAfter, focusedCheck.Binding) || !HasEditorFocus(focusedCheck.Editor, expectedAfter.EditorId))
-                throw new InvalidOperationException("写入后输入框未保持焦点或内容已变化，未发送回车提交");
-            updated = focusedCheck;
-            var modWait = Stopwatch.StartNew();
-            while (!RenameKeys.ModifiersReleased() && modWait.ElapsedMilliseconds < 300) Thread.Sleep(25);
-            if (!RenameKeys.ModifiersReleased()) throw new InvalidOperationException("检测到修饰键尚未松开，未发送回车提交");
-            cancellation.ThrowIfCancellationRequested();
-            if (rulesCurrent?.Invoke() == false) throw new InvalidOperationException("emoji 配置已经改变，本次未保存。");
-            progress(new(StatusKind.Processing, "正在按回车提交原生重命名…"));
-            if (!RenameKeys.SendEnter()) throw new InvalidOperationException("Windows 未允许发送回车提交，请检查原生输入框");
-            log.Write("重命名", "已校验前台、焦点与写入文本，并发送回车提交；等待原输入框关闭。");
+            void SendEnterCommit(string traceMessage)
+            {
+                var modWait = Stopwatch.StartNew();
+                while (!RenameKeys.ModifiersReleased() && modWait.ElapsedMilliseconds < 250) Thread.Sleep(15);
+                if (!RenameKeys.ModifiersReleased()) throw new InvalidOperationException("检测到修饰键尚未松开，未发送回车提交");
+                cancellation.ThrowIfCancellationRequested();
+                if (rulesCurrent?.Invoke() == false) throw new InvalidOperationException("emoji 配置已经改变，本次未保存。");
+                progress(new(StatusKind.Processing, "正在按回车提交原生重命名…"));
+                if (!RenameKeys.SendEnter()) throw new InvalidOperationException("Windows 未允许发送回车提交，请检查原生输入框");
+                log.Write("重命名", traceMessage);
+            }
+            bool hostForeground = Native.BelongsToWindow(Native.GetForegroundWindow(), expected.Window);
+            var commitPlan = Recognition.PlanInlineCommit(hostForeground, HasClosed(updated.Editor));
+            if (commitPlan == Recognition.InlineCommitPlan.AlreadyClosedOnBlur) return CompleteSubmitted("失焦自动提交");
+            if (commitPlan == Recognition.InlineCommitPlan.DirectForegroundEnter)
+            {
+                commitMethod = "前台直接回车";
+                if (!HasEditorFocus(updated.Editor, expectedAfter.EditorId))
+                {
+                    try { updated.Editor.Focus(); } catch { }
+                    var focusWait = Stopwatch.StartNew();
+                    while (!HasEditorFocus(updated.Editor, expectedAfter.EditorId) && focusWait.ElapsedMilliseconds < 200)
+                        Thread.Sleep(20);
+                    var focusedCheck = PollTransient(
+                        () => TryInspectMatchingScope(updated, expectedAfter, knownMainDocId, "提交前核验"),
+                        candidate => HasEditorFocus(candidate.Editor, expectedAfter.EditorId),
+                        400,
+                        25,
+                        cancellation,
+                        ex => log.Write("重命名瞬态", $"阶段=提交前核验;HResult=0x{ex.HResult:X8}"));
+                    if (focusedCheck is null)
+                    {
+                        if (HasClosed(updated.Editor)) return CompleteSubmitted("失焦自动提交");
+                        throw new InvalidOperationException("写入后输入框未保持焦点或内容已变化，未发送回车提交");
+                    }
+                    updated = focusedCheck;
+                }
+                if (!HasEditorFocus(updated.Editor, expectedAfter.EditorId))
+                    throw new InvalidOperationException("写入后输入框未保持焦点或内容已变化，未发送回车提交");
+                SendEnterCommit("已校验前台、焦点与写入文本，并发送回车提交；等待原输入框关闭。");
+            }
+            else
+            {
+                commitMethod = "后台消息提交";
+                if (rulesCurrent?.Invoke() == false) throw new InvalidOperationException("emoji 配置已经改变，本次未保存。");
+                Native.PostEnterKey(expected.Window);
+                if (WaitClosed(120)) return CompleteSubmitted(commitMethod);
+                commitMethod = "借焦点回车并切回";
+                var prevFg = Native.GetForegroundWindow();
+                try
+                {
+                    Native.SetForegroundWindow(expected.Window);
+                    var fgWait = Stopwatch.StartNew();
+                    while (!Native.BelongsToWindow(Native.GetForegroundWindow(), expected.Window) && fgWait.ElapsedMilliseconds < 250)
+                        Thread.Sleep(15);
+                    if (!Native.BelongsToWindow(Native.GetForegroundWindow(), expected.Window))
+                        throw new InvalidOperationException("前台窗口未处于目标宿主，未发送回车提交");
+                    if (!HasEditorFocus(updated.Editor, expectedAfter.EditorId))
+                    {
+                        try { updated.Editor.Focus(); } catch { }
+                        var focusWait = Stopwatch.StartNew();
+                        while (!HasEditorFocus(updated.Editor, expectedAfter.EditorId) && focusWait.ElapsedMilliseconds < 200)
+                            Thread.Sleep(20);
+                    }
+                    if (!HasEditorFocus(updated.Editor, expectedAfter.EditorId))
+                    {
+                        if (HasClosed(updated.Editor)) return CompleteSubmitted("借焦点期间失焦提交");
+                        throw new InvalidOperationException("写入后输入框未保持焦点，未发送回车提交");
+                    }
+                    SendEnterCommit("后台补焦点发送回车提交；等待原输入框关闭后自动切回原窗口。");
+                    if (WaitClosed(600)) return CompleteSubmitted(commitMethod);
+                }
+                finally
+                {
+                    if (prevFg != 0 && prevFg != expected.Window && prevFg != OwnWindow && Native.IsWindow(prevFg))
+                        Native.SetForegroundWindow(prevFg);
+                }
+            }
         }
         progress(new(StatusKind.Processing, "正在确认提交状态…"));
         var watch = Stopwatch.StartNew();
-        while (watch.ElapsedMilliseconds < 1800)
+        while (watch.ElapsedMilliseconds < 1500)
         {
-            if (HasClosed(updated.Container) || HasClosed(updated.Editor)) return Submitted(newTitle);
-            Thread.Sleep(80);
+            if (HasClosed(updated.Container) || HasClosed(updated.Editor))
+            {
+                log.Write("改名时序", $"校验={revalidateMs}ms;写入={writeMs}ms;提交={commitWatch.ElapsedMilliseconds}ms;总耗时={totalWatch.ElapsedMilliseconds}ms;方式={commitMethod}");
+                return Submitted(newTitle);
+            }
+            Thread.Sleep(20);
         }
         log.Write("重命名", "已尝试提交，但输入框未关闭；不自动重试");
         return new(newTitle, new(StatusKind.NeedsAction, "保存未确认，请检查原生输入框"));
@@ -853,6 +1046,30 @@ internal static class Native
     [DllImport("user32.dll")] static extern int SetWindowRgn(nint hwnd, nint region, bool redraw);
     [DllImport("user32.dll")] internal static extern bool SetForegroundWindow(nint hwnd);
     [DllImport("user32.dll")] internal static extern nint GetForegroundWindow();
+    [DllImport("user32.dll")] static extern bool PostMessageW(nint hwnd, uint msg, nint wp, nint lp);
+    internal static void PostEnterKey(nint hwnd)
+    {
+        const uint wmKeyDown = 0x0100, wmKeyUp = 0x0101;
+        nint downLp = (nint)0x001C0001L;
+        nint upLp = unchecked((nint)0xC01C0001L);
+        var targets = new List<nint>();
+        EnumChildWindows(hwnd, (child, _) =>
+        {
+            if (IsWindowVisible(child))
+            {
+                var cls = new StringBuilder(64);
+                if (GetClassName(child, cls, cls.Capacity) > 0 && cls.ToString() == "Chrome_RenderWidgetHostHWND")
+                    targets.Add(child);
+            }
+            return true;
+        }, 0);
+        targets.Add(hwnd);
+        foreach (var target in targets)
+        {
+            PostMessageW(target, wmKeyDown, 0x0D, downLp);
+            PostMessageW(target, wmKeyUp, 0x0D, upLp);
+        }
+    }
     [DllImport("user32.dll")] internal static extern bool IsWindow(nint hwnd);
     [DllImport("user32.dll")] internal static extern bool IsWindowVisible(nint hwnd);
     [DllImport("user32.dll")] internal static extern bool IsIconic(nint hwnd);

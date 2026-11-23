@@ -162,7 +162,7 @@ public sealed class AutomationWorker : IDisposable
             if (request.Operation == "rename" && (WritesBlocked || rulesCurrent?.Invoke() == false)) throw new InvalidOperationException("写入许可或 emoji 配置已变化，本次未发送。");
             request.Id = Interlocked.Increment(ref nextRequest); Interlocked.Exchange(ref activeRequest, request.Id);
             // 用户点击父面板后，将其已有的前台切换许可授予自有子进程；此处不激活任何窗口。
-            if (!fixtureProcess && request.Operation == "open" && process is { HasExited: false } child) AllowSetForegroundWindow((uint)child.Id);
+            if (!fixtureProcess && request.Operation is "open" or "rename" && process is { HasExited: false } child) AllowSetForegroundWindow((uint)child.Id);
             var budget = TimeSpan.FromMilliseconds(fixtureProcess ? 450 : request.Operation is "open" ? 14000 : request.Operation is "rename" ? 12000 : request.Operation is "diagnostic" ? 12000 : 7000);
             linked.CancelAfter(budget);
             sent = true;
