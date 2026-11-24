@@ -61,6 +61,8 @@ public partial class MainWindow
         var from = panels.PhysicalBounds;
         double sourceDpi = panels.Scale;
         ++contextVersion; ++visualEpoch; current = null; compact = value;
+        FinalizePendingProfileSwitch();
+        if (value) bar?.SetItems(emojiConfig.Items);
         preparingMode = true;
         bar!.ViewActive = value;
         try

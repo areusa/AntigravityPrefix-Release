@@ -33,6 +33,7 @@ internal static class SelfTests
             foreach (var icon in PrefixRules.Icons) Equal(icon, Encoding.UTF8.GetString(Encoding.UTF8.GetBytes(icon)));
             void Check(bool value, string reason) { if (!value) throw new InvalidOperationException(reason); count++; }
             CompatibilityValidation.Run(Check);
+            UpdateValidation.Run(Check);
             var binding = new EditorBinding((nint)101, 999, "原生框A", "输入框A", "保存A", "同名会话");
             Check(Recognition.IsSameBinding(binding, binding with { }), "相同绑定应通过");
             Check(!Recognition.IsSameBinding(binding, binding with { EditorId = "输入框B" }), "同名但不同输入框不能通过");

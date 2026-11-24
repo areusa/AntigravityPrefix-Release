@@ -44,6 +44,7 @@ try {
         if ($taskWorkerResult.passed -ne $true -or @($taskWorkerResult.checks).Count -eq 0) { throw '隔离工作进程验证报告不完整，原发布目录未替换。' }
         Write-Host ('隔离工作进程验证通过：' + @($taskWorkerResult.checks).Count + ' 项。')
         Copy-Item -LiteralPath $taskExe -Destination $taskStage
+        Copy-Item -LiteralPath (Join-Path $taskRoot 'assets/defaults/emoji-defaults.json') -Destination (Join-Path $taskStage 'default-emojis.json')
         Copy-Item -LiteralPath (Join-Path $taskRoot 'docs/usage/发布使用说明.md') -Destination (Join-Path $taskStage '使用说明.md')
         Copy-Item -LiteralPath (Join-Path $taskRoot 'THIRD-PARTY-NOTICES.txt') -Destination $taskStage
         $taskLicense = Join-Path $taskStage 'licenses'

@@ -1,6 +1,6 @@
 # AntigravityPrefix · 会话前缀
 
-Windows x64 免安装浮窗，为本机 Antigravity 会话添加或清除 emoji 前缀，支持可编辑列表、拖拽排序、完整面板与 mini bar。当前版本 **0.1.3**。
+Windows x64 免安装浮窗，为本机 Antigravity 会话添加或清除 emoji 前缀，支持可编辑列表、拖拽排序、完整面板与 mini bar。当前版本 **0.1.4**。
 
 ## 直接使用
 
@@ -8,7 +8,7 @@ Windows x64 免安装浮窗，为本机 Antigravity 会话添加或清除 emoji 
 
 先在 Antigravity 选中会话，点击工具的编辑入口：优先直接调用顶部 Breadcrumb 会话标题按钮触发内联编辑（失败时自动回退至右上角 `⋯（More actions）→ Rename`），零全局快捷键冲突；若自动打开受阻，也可手动点击顶部会话标题、会话右上角 `⋯ → Rename` 或侧栏 `⋯ → Rename`。工具识别到唯一可写内联输入框（`Edit title`）后，点击前缀或清除，写入后优先前台直接回车，并在焦点移开时通过后台窗口消息或瞬时借用焦点完成提交；完整模式非编辑态采用 `WS_EX_NOACTIVATE` 防失焦保护，并在 Antigravity 2.34.0 完成实机交互与持久化验收。工具只通过 Windows 官方可访问性接口（UIA3）操作，不修改 Antigravity 安装文件、数据库或内部状态。
 
-编辑列表使用勾号保存、叉号取消。用户配置独立固定在系统 LocalApplicationData 下的 `./AntigravityPrefix/emoji-settings.json`，更新程序不会覆盖它，且与 `CodexPrefix` 完全隔离。
+编辑列表使用勾号保存、叉号取消；列表区右下角按钮支持在常规态以平滑淡出/淡入无损切换「个人快照 / 内置默认」，并在编辑态提供「保存为个人快照」与「保存为内置默认」；面板最底部常驻显示当前版本与更新状态及紧随其后的图标按钮，无需进入设置即可直接检查或一键安装来自公开仓 `areusa/AntigravityPrefix-Release` 的更新。用户个人配置独立固定在系统 LocalApplicationData 下的 `./AntigravityPrefix/emoji-settings.json` 与 `settings.json`，更新与切换默认配置均不会覆盖它，且与 `CodexPrefix` 完全隔离；默认仅核心改名全程离线，仅在自动检查或手动更新时发起只读 HTTPS 请求，不上传任何本地数据。
 
 ## 双仓库协同
 

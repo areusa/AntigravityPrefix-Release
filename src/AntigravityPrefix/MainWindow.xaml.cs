@@ -23,6 +23,8 @@ public partial class MainWindow : Window
     readonly string settingsPath;
     readonly string dataFolder;
     readonly object fullOpenIcon;
+    bool autoCheckUpdate = true;
+    EmojiProfileMode activeProfile = EmojiProfileMode.Personal;
     bool operation;
     bool scanning;
     bool closed;
@@ -75,27 +77,28 @@ public partial class MainWindow : Window
     }
     string openBlockedDetail = "";
     FeedbackContext? openFeedbackContext;
+    readonly StartupUpdateContext? startupUpdateContext;
+    readonly bool isCustomDataDir;
 
-    public MainWindow(MockWindow? mock)
+    public MainWindow(MockWindow? mock) : this(mock, null, null) { }
+
+    internal MainWindow(MockWindow? mock, StartupUpdateContext? startupUpdate, string? customDataDir = null)
     {
         InitializeComponent();
+        startupUpdateContext = startupUpdate;
         fullOpenIcon = OpenRenameButton.Content;
-        dataFolder = mock is not null && TestDataRoot is not null ? TestDataRoot : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AntigravityPrefix", mock is null ? "" : "demo-v02");
+        isCustomDataDir = mock is null && !string.IsNullOrWhiteSpace(customDataDir);
+        dataFolder = mock is not null && TestDataRoot is not null
+            ? TestDataRoot
+            : isCustomDataDir
+                ? Path.GetFullPath(customDataDir!)
+                : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AntigravityPrefix", mock is null ? "" : "demo-v02");
         settingsPath = Path.Combine(dataFolder, "settings.json");
         log = new LocalLog(Path.Combine(dataFolder, "logs"));
         worker = new AutomationWorker(mock is null ? 0 : new WindowInteropHelper(mock).Handle, log);
         demoHandle = mock is null ? 0 : new WindowInteropHelper(mock).Handle;
+        LoadSettings();
         InitializeEmojiConfiguration();
-        try
-        {
-            if (File.Exists(settingsPath))
-            {
-                var settings = JsonSerializer.Deserialize<Settings>(File.ReadAllText(settingsPath, Encoding.UTF8));
-                Topmost = settings?.Topmost ?? true;
-                PinToggle.IsChecked = Topmost;
-            }
-        }
-        catch { log.Write("配置", "读取失败，使用默认置顶"); }
         InitializeLivePanels();
         SourceInitialized += (_, _) => { ownHandle = new WindowInteropHelper(this).Handle; Native.RoundCorners(ownHandle); HwndSource.FromHwnd(ownHandle).AddHook(EmojiWindowMessage); ApplyFullWindowActivationStyle(); };
         SizeChanged += (_, _) => Native.RoundCorners(ownHandle);
@@ -108,11 +111,13 @@ public partial class MainWindow : Window
             bar!.RenderIcons(); bar.Motion.Start();
             ShowStatus(new(StatusKind.Processing, "正在确认原生重命名框…"));
             if (emojiStore.LoadError is not null) ShowStatus(new(StatusKind.NeedsAction, "emoji 配置读取失败：点击设置可备份恢复", emojiStore.LoadError));
+            else if (defaultStore.LoadError is not null) ShowStatus(new(StatusKind.NeedsAction, "默认配置读取失败，已回退内置默认", defaultStore.LoadError));
             timer.Start();
             await Scan();
+            InitializeUpdater();
         };
         Closing += (_, _) => { tracker?.Dispose(); tracker = null; };
-        Closed += (_, _) => { closed = true; modeTransition?.Finish("工具关闭"); lifetime.Cancel(); timer.Stop(); tracker?.Dispose(); tracker = null; bar?.Close(); bar = null; worker.Dispose(); if (mock is not null) mock.Close(); };
+        Closed += (_, _) => { closed = true; modeTransition?.Finish("工具关闭"); lifetime.Cancel(); DisposeUpdater(); timer.Stop(); tracker?.Dispose(); tracker = null; bar?.Close(); bar = null; worker.Dispose(); if (mock is not null) mock.Close(); };
         EnableActions(false);
     }
     protected override void OnDpiChanged(DpiScale oldDpi, DpiScale newDpi)
@@ -222,30 +227,41 @@ public partial class MainWindow : Window
     {
         if (EditingEmoji)
         {
-            bool editable = emojiPhase == EmojiEditPhase.Editing;
+            bool updateBusy = IsUpdateBusy;
+            bool editable = emojiPhase == EmojiEditPhase.Editing && !updateBusy;
             foreach (var b in fullEmojiButtons.Values) b.IsEnabled = editable;
-            IconPanel.IsEnabled = editable; ClearButton.IsEnabled = EmojiSettingsButton.IsEnabled = editable && !IconPanel.Dragging;
+            IconPanel.IsEnabled = editable;
+            bool buttonsEnabled = editable && !IconPanel.Dragging;
+            ClearButton.IsEnabled = EmojiSettingsButton.IsEnabled = SecondaryLeftButton.IsEnabled = SecondaryRightButton.IsEnabled = buttonsEnabled;
             OpenRenameButton.IsEnabled = CompactToggle.IsEnabled = PinToggle.IsEnabled = DiagnosticButton.IsEnabled = CloseToolButton.IsEnabled = false;
             OpenRenameButton.BeginAnimation(OpacityProperty, null); OpenRenameButton.Opacity = .2; HeaderAppIcon.Opacity = .3;
             TargetText.Opacity = StatusBorder.Opacity = .3;
+            RefreshUpdateBarUi();
             bar?.SetActions(false, false); bar?.SetOpenEnabled(false); return;
         }
-        TargetText.Opacity = StatusBorder.Opacity = HeaderAppIcon.Opacity = 1; PinToggle.IsEnabled = DiagnosticButton.IsEnabled = CloseToolButton.IsEnabled = true;
-        EmojiSettingsButton.IsEnabled = !operation && modeTransition is null;
-        enabled &= !operation && !OpenBlocked && !panels.Relocating && (!compact || (tracker?.CanOperate == true && current?.Window == tracker.Target?.Handle));
-        IconPanel.IsEnabled = true;
+        bool busyUpdating = IsUpdateBusy;
+        TargetText.Opacity = StatusBorder.Opacity = HeaderAppIcon.Opacity = 1;
+        PinToggle.IsEnabled = true;
+        DiagnosticButton.IsEnabled = !busyUpdating;
+        CloseToolButton.IsEnabled = !busyUpdating;
+        EmojiSettingsButton.IsEnabled = !operation && !busyUpdating && modeTransition is null;
+        SecondaryLeftButton.IsEnabled = HasPersonalSnapshot && !operation && !busyUpdating && !panels.Relocating && modeTransition is null;
+        SecondaryRightButton.IsEnabled = false;
+        enabled &= !operation && !busyUpdating && !OpenBlocked && !panels.Relocating && (!compact || (tracker?.CanOperate == true && current?.Window == tracker.Target?.Handle));
+        IconPanel.IsEnabled = !busyUpdating;
         foreach (var button in fullEmojiButtons.Values)
         {
             button.IsEnabled = enabled && current is not null && PrefixRules.CanChange(current.OriginalValue, (string)button.Tag, emojiConfig);
             AutomationProperties.SetHelpText(button, enabled && !button.IsEnabled ? "当前前缀无需重复修改，或结果为空/超过标题长度限制。" : "");
         }
         ClearButton.IsEnabled = enabled && current is not null && PrefixRules.CanChange(current.OriginalValue, null, emojiConfig);
-        CompactToggle.IsEnabled = !operation;
+        CompactToggle.IsEnabled = !operation && !busyUpdating;
         bar?.SetActions(enabled, operation);
         bar?.SetItemStates(enabled ? current?.OriginalValue : null, emojiConfig);
-        OpenRenameButton.IsEnabled = !operation && !OpenBlocked && !panels.Relocating && current is null;
+        OpenRenameButton.IsEnabled = !operation && !busyUpdating && !OpenBlocked && !panels.Relocating && current is null;
         OpenRenameButton.Cursor = OpenRenameButton.IsEnabled ? Cursors.Hand : Cursors.Arrow;
-        bar?.SetOpenEnabled(!operation && !OpenBlocked && !panels.Relocating && current is null);
+        bar?.SetOpenEnabled(!operation && !busyUpdating && !OpenBlocked && !panels.Relocating && current is null);
+        RefreshUpdateBarUi();
     }
     async void ClickOpenRename(object sender, RoutedEventArgs e) => await RequestOpenRename();
     void FullOpenFeedback(bool failed, bool fade = false)
@@ -402,16 +418,43 @@ public partial class MainWindow : Window
         if (SystemParameters.ClientAreaAnimation)
             StatusText.BeginAnimation(OpacityProperty, new DoubleAnimation(0.55, 1, duration) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } });
     }
+    void LoadSettings()
+    {
+        try
+        {
+            if (!File.Exists(settingsPath)) return;
+            var settings = JsonSerializer.Deserialize<Settings>(File.ReadAllText(settingsPath, Encoding.UTF8));
+            if (settings is null) return;
+            Topmost = settings.Topmost;
+            PinToggle.IsChecked = Topmost;
+            activeProfile = string.Equals(settings.ActiveProfile, "default", StringComparison.OrdinalIgnoreCase)
+                ? EmojiProfileMode.Default
+                : EmojiProfileMode.Personal;
+            autoCheckUpdate = settings.AutoCheckUpdate;
+        }
+        catch { log.Write("配置", "读取失败，使用默认配置"); }
+    }
+    bool SaveSettings()
+    {
+        try
+        {
+            Directory.CreateDirectory(dataFolder);
+            var model = new Settings
+            {
+                Topmost = Topmost,
+                ActiveProfile = activeProfile == EmojiProfileMode.Default ? "default" : "personal",
+                AutoCheckUpdate = autoCheckUpdate,
+            };
+            File.WriteAllText(settingsPath, JsonSerializer.Serialize(model), new UTF8Encoding(true));
+            return true;
+        }
+        catch { return false; }
+    }
     void TogglePin(object sender, RoutedEventArgs e)
     {
         if (EditingEmoji) return;
         Topmost = PinToggle.IsChecked == true;
-        try
-        {
-            Directory.CreateDirectory(dataFolder);
-            File.WriteAllText(settingsPath, JsonSerializer.Serialize(new Settings(Topmost)), new UTF8Encoding(true));
-        }
-        catch { ShowStatus(new(StatusKind.NeedsAction, "置顶已切换，但设置未能保存")); }
+        if (!SaveSettings()) ShowStatus(new(StatusKind.NeedsAction, "置顶已切换，但设置未能保存"));
     }
     void DragHeader(object sender, MouseButtonEventArgs e)
     {
@@ -462,5 +505,10 @@ public partial class MainWindow : Window
         catch (Exception ex) { ShowStatus(new(StatusKind.Error, "诊断保存失败", ex.Message)); }
         finally { messageUntil = DateTime.UtcNow.AddSeconds(8); operation = false; await Scan(); }
     }
-    record Settings(bool Topmost);
+    sealed record Settings
+    {
+        public bool Topmost { get; init; } = true;
+        public string ActiveProfile { get; init; } = "personal";
+        public bool AutoCheckUpdate { get; init; } = true;
+    }
 }

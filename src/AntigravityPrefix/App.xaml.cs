@@ -1,4 +1,5 @@
 using System.IO;
+using System.Security.Cryptography;
 using System.Text;
 using System.Windows;
 
@@ -10,6 +11,12 @@ public partial class App : Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        if (e.Args.Contains("--apply-update"))
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            Shutdown(UpdateApplier.Run(e.Args));
+            return;
+        }
         if (e.Args.FirstOrDefault() == "--automation-worker")
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
@@ -98,10 +105,30 @@ public partial class App : Application
         }
         MockWindow? mock = null;
         var demo = e.Args.Contains("--demo");
-        singleInstance = new Mutex(true, demo ? "Local\\AntigravityPrefix.Demo.v02" : "Local\\AntigravityPrefix.Main", out var first);
+        var startupUpdate = UpdateApplier.ParseStartupUpdateContext(e.Args);
+        string? customDataDir = null;
+        for (int i = 0; i < e.Args.Length - 1; i++)
+            if (e.Args[i] == "--data-dir" && !string.IsNullOrWhiteSpace(e.Args[i + 1]))
+                customDataDir = e.Args[i + 1];
+        string mutexName = demo
+            ? "Local\\AntigravityPrefix.Demo.v02"
+            : customDataDir is not null
+                ? "Local\\AntigravityPrefix.Custom." + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(customDataDir).ToUpperInvariant())))[..12]
+                : "Local\\AntigravityPrefix.Main";
+        bool first;
+        singleInstance = new Mutex(true, mutexName, out first);
+        if (!first && (startupUpdate.UpdatedFrom is not null || startupUpdate.UpdateFailed is not null))
+        {
+            for (int attempt = 0; attempt < 20 && !first; attempt++)
+            {
+                singleInstance.Dispose();
+                Thread.Sleep(100);
+                singleInstance = new Mutex(true, mutexName, out first);
+            }
+        }
         if (!first) { MessageBox.Show("工具已经在运行。", "会话前缀"); Shutdown(); return; }
         if (demo) { mock = new MockWindow(ignoreShortcut: e.Args.Contains("--demo-no-shortcut")); mock.Show(); }
-        var main = new MainWindow(mock) { DemoLostHost = demo && e.Args.Contains("--demo-lost") };
+        var main = new MainWindow(mock, startupUpdate, customDataDir) { DemoLostHost = demo && e.Args.Contains("--demo-lost") };
         MainWindow = main;
         main.Show();
         if (demo && e.Args.Contains("--demo-lost")) main.SetCompact(true);

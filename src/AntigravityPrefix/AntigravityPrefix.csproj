@@ -7,7 +7,7 @@
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyName>AntigravityPrefix</AssemblyName>
-    <Version>0.1.3</Version>
+    <Version>0.1.4</Version>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <Deterministic>true</Deterministic>
     <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
@@ -29,6 +29,7 @@
     <Resource Include="../../assets/app-icon/release-v2/app.ico" Link="assets/app-icon/release-v2/app.ico" />
     <EmbeddedResource Include="../../assets/motion/approved-2026-10-28.json" LogicalName="AntigravityPrefix.Motion.Calibration.json" />
     <EmbeddedResource Include="../../assets/motion/html-reference.json" LogicalName="AntigravityPrefix.Motion.Reference.json" />
+    <EmbeddedResource Include="../../assets/defaults/emoji-defaults.json" LogicalName="AntigravityPrefix.Defaults.emoji-defaults.json" />
     <EmbeddedResource Include="../../assets/unicode/17.0/emoji-test.txt" LogicalName="AntigravityPrefix.Unicode.emoji-test.txt" />
     <EmbeddedResource Include="../../assets/unicode/17.0/LICENSE.txt" LogicalName="AntigravityPrefix.Unicode.LICENSE.txt" />
     <EmbeddedResource Include="../../THIRD-PARTY-NOTICES.txt" LogicalName="AntigravityPrefix.THIRD-PARTY-NOTICES.txt" />

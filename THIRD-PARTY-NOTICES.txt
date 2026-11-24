@@ -4,6 +4,7 @@
 0.3.0 新增官方 MingCute 图形：layout_top、fullscreen_exit、eraser。
 0.3.1 新增同一官方提交的 edit 图形，用于打开原生重命名框的入口。
 来源提交 ca98bb55513a22ff0dab713aaf7870b512944653，原始 SVG 保留在 ./assets/mingcute/bar/；WPF 保留路径与描边，颜色由界面控制。
+新增双配置切换与自更新功能用到的官方 MingCute 图形：transfer_horizontal_line、user_3_line、box_3_line、refresh_2_line、download_2_line，原始 SVG 保留在 ./assets/mingcute/svg/update/。
 项目：https://www.mingcute.com/ ，Apache-2.0 许可。
 原始 SVG 和许可保留在 ./assets/mingcute/；WPF 使用原始主体路径，移除无绘制辅助路径，颜色由界面状态控制。
 完整 Apache-2.0 许可同时嵌入程序，可在「诊断 → 第三方许可」中查看。

@@ -33,7 +33,7 @@ internal sealed class LivePanelHost
     {
         this.window = window;
         FullContent = (FrameworkElement)full.Child; full.Child = null;
-        FullContent.Width = 352; FullContent.Height = 144;
+        FullContent.Width = 352; FullContent.Height = 195;
         MiniContent = bar.Frame;
         ((Grid)bar.Content).Children.Remove(MiniContent);
         MiniContent.Margin = new Thickness(0); MiniContent.Background = null; MiniContent.BorderBrush = null;
@@ -44,7 +44,7 @@ internal sealed class LivePanelHost
         contents.Children.Add(FullContent); contents.Children.Add(MiniContent);
         window.Content = null;
         canvas.Children.Add(Shell); window.Content = canvas;
-        Shell.Width = 382; Shell.Height = 166; contents.Width = 380; contents.Height = 164;
+        Shell.Width = 382; Shell.Height = 217; contents.Width = 380; contents.Height = 215;
         Canvas.SetLeft(Shell, 0); Canvas.SetTop(Shell, 0);
         // Shell 的边框占一 DIP，子控件坐标从边框内侧起算。
         Canvas.SetLeft(FullContent, 14); Canvas.SetTop(FullContent, 10);
@@ -91,7 +91,7 @@ internal sealed class LivePanelHost
         if (!WithinBudget(area.Width, area.Height)) { Trace?.Invoke("初始空间超出像素预算"); return; }
         var target = new TrackingNative.Rect((int)Math.Floor(area.Left), (int)Math.Floor(area.Top), (int)Math.Ceiling(area.Right), (int)Math.Ceiling(area.Bottom));
         // Loaded 首个内容帧前预留本显示器运动空间。普通首切不再先把旧表面搬到目的地。
-        Apply(Dip(current, scale), FullOpacity, MiniOpacity, Shell.CornerRadius.TopLeft, Shell.RenderTransform, false, target);
+        Apply(Dip(current, scale), FullOpacity, MiniOpacity, Shell.CornerRadius.TopLeft, Shell.RenderTransform, true, target);
         MoveNative(target); canvas.UpdateLayout(); InitialEnvelopeReserved = true;
         Trace?.Invoke("首帧前预留运动空间");
     }

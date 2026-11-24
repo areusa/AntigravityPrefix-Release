@@ -34,6 +34,7 @@ public sealed class EmojiGridPanel : Panel
     internal EmojiViewport? Viewport { get; set; }
     internal bool Editing { get => editing; set { if (editing == value) return; editing = value; CancelGesture(); Wake(); } }
     internal bool Dragging => dragging;
+    internal bool HasMovingCells => cells.Values.Any(c => c.X.Moving || c.Y.Moving || c.Scale.Moving);
     internal string? DragId => dragging ? candidate?.Uid : null;
     internal event Action<string>? ToggleDeleted;
     internal event Action<string, int>? Reorder;
@@ -52,7 +53,7 @@ public sealed class EmojiGridPanel : Panel
         Loaded += (_, _) => Wake(); Unloaded += (_, _) => { CancelGesture(); Stop(); };
         IsVisibleChanged += (_, _) => { if (!IsVisible) { CancelGesture(); Stop(); } else Wake(); };
     }
-    internal void SetButtons(IEnumerable<Button> buttons)
+    internal void SetButtons(IEnumerable<Button> buttons, bool snapImmediate = false)
     {
         var next = buttons.ToArray();
         foreach (var removed in cells.Keys.Except(next).ToArray()) { Children.Remove(removed); cells.Remove(removed); }
@@ -63,10 +64,20 @@ public sealed class EmojiGridPanel : Panel
             cells.Add(button, cell); button.RenderTransform = cell.Shift;
             Children.Add(button);
         }
+        if (snapImmediate) SnapAll();
         var focused = Keyboard.FocusedElement as Button;
         for (int i = 0; i < next.Length; i++) if (!ReferenceEquals(Children[i], next[i])) { Children.Remove(next[i]); Children.Insert(i, next[i]); }
         if (focused is not null && next.Contains(focused) && !ReferenceEquals(Keyboard.FocusedElement, focused)) focused.Focus();
         order.Clear(); order.AddRange(next); InvalidateMeasure(); InvalidateArrange(); Wake();
+    }
+    internal void SnapAll()
+    {
+        foreach (var c in cells.Values)
+        {
+            c.Placed = false;
+            c.X.V = c.Y.V = 0;
+            c.Scale.Snap(1);
+        }
     }
     protected override Size MeasureOverride(Size availableSize)
     {

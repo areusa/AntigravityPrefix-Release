@@ -15,11 +15,15 @@ public partial class MainWindow
     enum EmojiEditPhase { Normal, Editing, Adding, Saving }
     EmojiEditPhase emojiPhase;
     EmojiConfigurationStore emojiStore = null!;
+    DefaultEmojiStore defaultStore = null!;
+    PrefixSnapshot personalConfig = PrefixSnapshot.Default;
+    PrefixSnapshot defaultConfig = PrefixSnapshot.Default;
     PrefixSnapshot emojiConfig = PrefixSnapshot.Default;
     EmojiDraft? emojiDraft;
     readonly Dictionary<string, Button> fullEmojiButtons = [];
     Button? addEmojiButton;
     long emojiGeneration;
+    int profileSwitchVersion;
     string[]? dragOrder;
     string? savedAnchor;
     double savedOffset;
@@ -27,13 +31,26 @@ public partial class MainWindow
     static readonly DependencyProperty AnimatedListHeightProperty = DependencyProperty.Register("AnimatedListHeight", typeof(double), typeof(MainWindow), new PropertyMetadata(35d, (d, e) => ((MainWindow)d).ApplyListHeight((double)e.NewValue)));
     internal static string? TestDataRoot;
     internal bool EditingEmoji => emojiPhase != EmojiEditPhase.Normal;
+    internal bool HasPersonalSnapshot => emojiStore.Exists && !emojiStore.RecoveryRequired;
     internal PrefixSnapshot EmojiConfiguration => emojiConfig;
+    internal EmojiProfileMode ActiveEmojiProfile => activeProfile;
     internal EmojiDraft? ActiveEmojiDraft => emojiDraft;
     internal string EmojiConfigurationPath => emojiStore.FilePath;
+    internal string DefaultEmojiConfigurationPath => defaultStore.RuntimeFilePath;
+
+    PrefixSnapshot BuildActiveEmojiConfig() => activeProfile == EmojiProfileMode.Default
+        ? PrefixSnapshot.MergeHistory(defaultConfig, personalConfig)
+        : PrefixSnapshot.MergeHistory(personalConfig, defaultConfig);
 
     void InitializeEmojiConfiguration()
     {
-        emojiStore = new(dataFolder); emojiConfig = emojiStore.Load();
+        defaultStore = new DefaultEmojiStore(AppContext.BaseDirectory, allowRepoSync: TestDataRoot is null && demoHandle == 0 && !isCustomDataDir);
+        defaultConfig = defaultStore.Load();
+        emojiStore = new(dataFolder);
+        personalConfig = emojiStore.Load(defaultConfig);
+        if (!HasPersonalSnapshot) activeProfile = EmojiProfileMode.Default;
+        emojiConfig = BuildActiveEmojiConfig();
+        ToolTipService.SetShowOnDisabled(SecondaryLeftButton, true);
         IconPanel.Viewport = FullEmojiViewport;
         IconPanel.ToggleDeleted += id =>
         {
@@ -41,7 +58,7 @@ public partial class MainWindow
             var item = emojiDraft.Items.Single(i => i.Item.Id == id); item.Deleted = !item.Deleted;
             RefreshFullEmojiVisuals(); EditorStatus("草稿已更新；勾号保存，叉号取消。再次点击可撤销待删除。");
         };
-        IconPanel.DragBeginning += () => { dragOrder = emojiDraft?.Items.Select(i => i.Item.Id).ToArray(); ClearButton.IsEnabled = EmojiSettingsButton.IsEnabled = false; };
+        IconPanel.DragBeginning += () => { dragOrder = emojiDraft?.Items.Select(i => i.Item.Id).ToArray(); ClearButton.IsEnabled = EmojiSettingsButton.IsEnabled = SecondaryLeftButton.IsEnabled = SecondaryRightButton.IsEnabled = false; };
         IconPanel.Reorder += (id, slot) =>
         {
             if (emojiDraft is null || emojiPhase != EmojiEditPhase.Editing) return;
@@ -75,25 +92,72 @@ public partial class MainWindow
         };
         RefreshFullItems(); UpdateConfigurationIcons();
     }
-    internal static object ActionGlyph(string key, double size = 16)
+    internal static object ActionGlyph(string key, double size = 16, Color? color = null)
     {
-        var path = new System.Windows.Shapes.Path { Data = (Geometry)Application.Current.FindResource(key), Stroke = new SolidColorBrush(Color.FromRgb(163, 163, 174)), StrokeThickness = 2,
-            StrokeStartLineCap = PenLineCap.Round, StrokeEndLineCap = PenLineCap.Round, StrokeLineJoin = PenLineJoin.Round, IsHitTestVisible = false };
-        if (key == "CloseGeometry") { path.Stroke = null; path.Fill = new SolidColorBrush(Color.FromRgb(163, 163, 174)); }
+        var brush = new SolidColorBrush(color ?? Color.FromRgb(163, 163, 174));
+        bool fillMode = key is "CloseGeometry" or "ProfileSwitchGeometry" or "PersonalSnapshotGeometry"
+            or "BuiltinDefaultGeometry" or "RefreshUpdateGeometry" or "DownloadUpdateGeometry";
+        var path = new System.Windows.Shapes.Path
+        {
+            Data = (Geometry)Application.Current.FindResource(key),
+            Stroke = fillMode ? null : brush,
+            Fill = fillMode ? brush : null,
+            StrokeThickness = fillMode ? 0 : 2,
+            StrokeStartLineCap = PenLineCap.Round,
+            StrokeEndLineCap = PenLineCap.Round,
+            StrokeLineJoin = PenLineJoin.Round,
+            IsHitTestVisible = false,
+        };
         return new Viewbox { Width = size, Height = size, IsHitTestVisible = false, Child = new Canvas { Width = 24, Height = 24, Children = { path } } };
     }
     void UpdateConfigurationIcons()
     {
         ClearButton.Content = ActionGlyph(EditingEmoji ? "CheckGeometry" : "EraserGeometry");
-        EmojiSettingsButton.Content = ActionGlyph(EditingEmoji ? "CloseGeometry" : "SettingsGeometry");
-        ClearButton.ToolTip = EditingEmoji ? "确认并保存 emoji 配置" : "清除已登记的前缀";
-        EmojiSettingsButton.ToolTip = EditingEmoji ? "取消全部草稿修改" : "编辑 emoji 列表";
+        ClearButton.ToolTip = EditingEmoji
+            ? (!HasPersonalSnapshot ? "确认并保存为个人快照" : activeProfile == EmojiProfileMode.Default ? "确认并保存当前内置默认" : "确认并保存个人快照")
+            : "清除已登记的前缀";
+
+        if (EditingEmoji)
+        {
+            EmojiSettingsButton.Content = ActionGlyph("CloseGeometry");
+            EmojiSettingsButton.ToolTip = "取消全部草稿修改";
+            SecondaryLeftButton.Content = ActionGlyph("PersonalSnapshotGeometry");
+            SecondaryLeftButton.ToolTip = "保存为个人快照（不会被更新覆盖，也不会上传）";
+            SecondaryRightButton.Content = ActionGlyph("BuiltinDefaultGeometry");
+            SecondaryRightButton.ToolTip = "保存为内置默认（可随版本提交，更新会覆盖）";
+            SecondaryRightButton.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            EmojiSettingsButton.Content = ActionGlyph("SettingsGeometry");
+            EmojiSettingsButton.ToolTip = "编辑 emoji 列表";
+
+            SecondaryLeftButton.Content = ActionGlyph("ProfileSwitchGeometry");
+            SecondaryLeftButton.ToolTip = !HasPersonalSnapshot
+                ? "当前使用内置默认 · 尚未保存个人快照（可在设置中保存）"
+                : activeProfile == EmojiProfileMode.Default
+                    ? "当前使用内置默认 · 点击切换回个人快照"
+                    : "当前使用个人快照 · 点击切换为内置默认（不覆盖个人快照）";
+            SecondaryRightButton.Content = null;
+            SecondaryRightButton.ToolTip = null;
+            SecondaryRightButton.Visibility = Visibility.Collapsed;
+        }
+
         AutomationProperties.SetName(ClearButton, (string)ClearButton.ToolTip);
         AutomationProperties.SetName(EmojiSettingsButton, (string)EmojiSettingsButton.ToolTip);
+        AutomationProperties.SetName(SecondaryLeftButton, (string)SecondaryLeftButton.ToolTip!);
+        AutomationProperties.SetName(SecondaryRightButton, (string?)SecondaryRightButton.ToolTip ?? "保存为内置默认");
+        SecondaryLeftButton.Focusable = EditingEmoji;
+        SecondaryRightButton.Focusable = EditingEmoji && SecondaryRightButton.Visibility == Visibility.Visible;
+
         if (IsLoaded && SystemParameters.ClientAreaAnimation)
         {
             var fade = new DoubleAnimation(.5, 1, TimeSpan.FromMilliseconds(160)) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }, FillBehavior = FillBehavior.Stop };
-            ClearButton.BeginAnimation(OpacityProperty, fade); EmojiSettingsButton.BeginAnimation(OpacityProperty, fade);
+            ClearButton.BeginAnimation(OpacityProperty, fade);
+            EmojiSettingsButton.BeginAnimation(OpacityProperty, fade);
+            SecondaryLeftButton.BeginAnimation(OpacityProperty, fade);
+            if (SecondaryRightButton.Visibility == Visibility.Visible)
+                SecondaryRightButton.BeginAnimation(OpacityProperty, fade);
         }
     }
     Button NewFullEmojiButton(EmojiItem item)
@@ -114,17 +178,19 @@ public partial class MainWindow
         foreach (var b in fullEmojiButtons.Values) b.Focusable = focusable;
         ClearButton.Focusable = focusable;
         EmojiSettingsButton.Focusable = focusable;
+        SecondaryLeftButton.Focusable = focusable;
+        SecondaryRightButton.Focusable = focusable && SecondaryRightButton.Visibility == Visibility.Visible;
     }
-    void RefreshFullItems()
+    void RefreshFullItems(bool snapImmediate = false, bool animateLayout = true)
     {
         var items = emojiDraft?.Items.Select(i => i.Item).ToArray() ?? emojiConfig.Items.ToArray();
         foreach (var id in fullEmojiButtons.Keys.Except(items.Select(i => i.Id)).ToArray()) fullEmojiButtons.Remove(id);
         foreach (var item in items) { if (!fullEmojiButtons.ContainsKey(item.Id)) fullEmojiButtons.Add(item.Id, NewFullEmojiButton(item)); else fullEmojiButtons[item.Id].Tag = item.Token; }
         addEmojiButton ??= MakeAddButton();
-        IconPanel.SetButtons((EditingEmoji ? new[] { addEmojiButton } : Array.Empty<Button>()).Concat(items.Select(i => fullEmojiButtons[i.Id])));
+        IconPanel.SetButtons((EditingEmoji ? new[] { addEmojiButton } : Array.Empty<Button>()).Concat(items.Select(i => fullEmojiButtons[i.Id])), snapImmediate);
         IconPanel.Editing = EditingEmoji;
         UpdateFullButtonFocusability();
-        RefreshFullEmojiVisuals(); UpdateFullEmojiLayout();
+        RefreshFullEmojiVisuals(); UpdateFullEmojiLayout(animateLayout);
     }
     Button MakeAddButton()
     {
@@ -153,25 +219,31 @@ public partial class MainWindow
             button.ToolTip = text; AutomationProperties.SetName(button, text);
         }
     }
-    void UpdateFullEmojiLayout()
+    void UpdateFullEmojiLayout(bool animate = true)
     {
         int count = (emojiDraft?.Items.Count ?? emojiConfig.Items.Count) + (EditingEmoji ? 1 : 0);
         double maximum = EmojiLayout.FullViewport(count);
         if (ownHandle != 0)
         {
             var work = TrackingNative.WorkArea(ownHandle); double scale = panels.Scale;
-            maximum = Math.Min(maximum, Math.Max(17.5, (work.Bottom - work.Top) / scale - 131));
+            maximum = Math.Min(maximum, Math.Max(17.5, (work.Bottom - work.Top) / scale - 143));
             if (maximum < EmojiLayout.FullViewport(count)) log.Write("布局适配", "工作区不足，完整列表视口已收窄；保留固定操作与状态区。");
         }
-        if (IsLoaded && !compact && SystemParameters.ClientAreaAnimation && Math.Abs((double)GetValue(AnimatedListHeightProperty) - maximum) > .01)
+        if (animate && IsLoaded && !compact && SystemParameters.ClientAreaAnimation && Math.Abs((double)GetValue(AnimatedListHeightProperty) - maximum) > .01)
             BeginAnimation(AnimatedListHeightProperty, new DoubleAnimation((double)GetValue(AnimatedListHeightProperty), maximum, TimeSpan.FromMilliseconds(180)) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } });
         else { BeginAnimation(AnimatedListHeightProperty, null); SetValue(AnimatedListHeightProperty, maximum); ApplyListHeight(maximum); }
     }
     void ApplyListHeight(double height)
     {
-        FullEmojiViewport.Height = height; EmojiActionRow.Height = new GridLength(48 + height - 35);
+        FullEmojiViewport.Height = height;
+        double rowVisual = Math.Max(74d, height);
+        EmojiActionRow.Height = new GridLength(48 + rowVisual - 35);
         if (panels is null) return;
-        panels.ResizeFullContent(144 + height - 35, !compact && IsLoaded);
+        double targetFullHeight = 156 + rowVisual - 35;
+        if (Math.Abs(panels.FullContent.Height - targetFullHeight) > .01)
+            panels.ResizeFullContent(targetFullHeight, !compact && IsLoaded);
+        else if (!compact && IsLoaded && !panels.FullContent.IsHitTestVisible)
+            panels.SetInteractive(false);
     }
     void UpdateEmojiInputPlacement()
     {
@@ -227,10 +299,19 @@ public partial class MainWindow
         try { ShowStatus(new(failed ? StatusKind.Error : StatusKind.Ready, text)); }
         finally { writingEditorStatus = false; }
     }
+    internal void FinalizePendingProfileSwitch()
+    {
+        ++profileSwitchVersion;
+        emojiConfig = BuildActiveEmojiConfig();
+        FullEmojiViewport.BeginAnimation(OpacityProperty, null);
+        FullEmojiViewport.Opacity = 1;
+        FullEmojiViewport.IsHitTestVisible = true;
+    }
     internal void BeginEmojiEdit()
     {
         if (closed || operation || compact || panels.Relocating || modeTransition is not null || EditingEmoji) return;
         CancelEditorPointers();
+        FinalizePendingProfileSwitch();
         emojiPhase = EmojiEditPhase.Editing; emojiDraft = new(emojiConfig);
         ++contextVersion; ++visualEpoch; Interlocked.Increment(ref emojiGeneration); current = null;
         savedOffset = FullEmojiViewport.Offset;
@@ -238,37 +319,145 @@ public partial class MainWindow
         RefreshFullItems(); UpdateConfigurationIcons(); EnableActions(false);
         ApplyFullWindowActivationStyle();
         if (IsVisible && !IsActive) Activate();
-        EditorStatus("编辑列表：点击待删/撤销，拖动排序，勾号保存、叉号取消。");
+        EditorStatus("编辑列表：点击待删/撤销，拖动排序，勾号保存、叉号取消；下方可存个人或默认。");
         if (emojiStore.RecoveryRequired) OpenEmojiInput(true);
     }
     void ToggleEmojiSettings(object sender, RoutedEventArgs e)
-    { if (!EditingEmoji) BeginEmojiEdit(); else if (emojiPhase == EmojiEditPhase.Editing) CancelEmojiEdit(); }
+    { if (!EditingEmoji) BeginEmojiEdit(); else if (emojiPhase == EmojiEditPhase.Editing && !IsUpdateBusy) CancelEmojiEdit(); }
+    async void ClickSecondaryLeft(object sender, RoutedEventArgs e)
+    { if (EditingEmoji) SavePersonalEdit(); else await ToggleActiveProfile(); }
+    void ClickSecondaryRight(object sender, RoutedEventArgs e)
+    { if (EditingEmoji) SaveDefaultEdit(); }
+    internal async Task ToggleActiveProfile()
+    {
+        if (!HasPersonalSnapshot || closed || operation || compact || panels.Relocating || modeTransition is not null || EditingEmoji || IsUpdateBusy) return;
+        CancelEditorPointers();
+        int switchVer = ++profileSwitchVersion;
+        activeProfile = activeProfile == EmojiProfileMode.Default ? EmojiProfileMode.Personal : EmojiProfileMode.Default;
+        SaveSettings();
+        UpdateConfigurationIcons();
+
+        bool animate = IsLoaded && SystemParameters.ClientAreaAnimation;
+        if (animate)
+        {
+            double currentOpacity = FullEmojiViewport.Opacity;
+            FullEmojiViewport.IsHitTestVisible = false;
+            FullEmojiViewport.BeginAnimation(OpacityProperty, null);
+            FullEmojiViewport.Opacity = currentOpacity;
+            FullEmojiViewport.BeginAnimation(OpacityProperty, new DoubleAnimation(currentOpacity, 0, TimeSpan.FromMilliseconds(120)) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } });
+            await Task.Delay(120);
+            if (closed || switchVer != profileSwitchVersion) return;
+            if (EditingEmoji || compact)
+            {
+                FullEmojiViewport.BeginAnimation(OpacityProperty, null);
+                FullEmojiViewport.Opacity = 1;
+                FullEmojiViewport.IsHitTestVisible = true;
+                return;
+            }
+        }
+
+        emojiConfig = BuildActiveEmojiConfig();
+        Interlocked.Increment(ref emojiGeneration);
+        FullEmojiViewport.ScrollTo(0, false);
+        bool rowHeightChanged = Math.Abs(Math.Max(74d, EmojiLayout.FullViewport(emojiConfig.Items.Count)) - Math.Max(74d, FullEmojiViewport.Height)) > .01;
+        RefreshFullItems(snapImmediate: true, animateLayout: rowHeightChanged);
+        EnableActions(current is not null);
+        var note = activeProfile == EmojiProfileMode.Default ? "已切换至内置默认列表（个人快照已保留）" : "已切换回个人快照列表";
+        ShowStatus(new(StatusKind.Completed, note));
+        messageUntil = DateTime.UtcNow.AddSeconds(3);
+        log.Write("配置切换", $"profile={activeProfile};count={emojiConfig.Items.Count}");
+
+        if (!compact && bar is not null)
+        {
+            var items = emojiConfig.Items;
+            _ = Dispatcher.BeginInvoke(DispatcherPriority.Background, () => { if (!closed) bar?.SetItems(items); });
+        }
+        else
+        {
+            bar?.SetItems(emojiConfig.Items);
+        }
+
+        FullEmojiViewport.IsHitTestVisible = true;
+        if (animate)
+        {
+            FullEmojiViewport.BeginAnimation(OpacityProperty, null);
+            FullEmojiViewport.Opacity = 0;
+            FullEmojiViewport.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(160)) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } });
+        }
+        else
+        {
+            FullEmojiViewport.BeginAnimation(OpacityProperty, null);
+            FullEmojiViewport.Opacity = 1;
+        }
+    }
+    internal bool HasUnsavedEmojiDraft()
+    {
+        if (emojiDraft is null) return false;
+        if (emojiDraft.Items.Any(i => i.Deleted || i.Added)) return true;
+        var sourceIds = (activeProfile == EmojiProfileMode.Default ? defaultConfig : personalConfig).Items.Select(i => i.Id);
+        return !emojiDraft.Items.Select(i => i.Item.Id).SequenceEqual(sourceIds);
+    }
     internal void SaveEmojiEdit()
     {
-        if (emojiPhase != EmojiEditPhase.Editing || emojiDraft is null || IconPanel.Dragging) return;
+        if (!HasPersonalSnapshot || activeProfile == EmojiProfileMode.Personal) SavePersonalEdit();
+        else SaveDefaultEdit();
+    }
+    internal void SavePersonalEdit()
+    {
+        if (emojiPhase != EmojiEditPhase.Editing || emojiDraft is null || IconPanel.Dragging || IsUpdateBusy) return;
         emojiPhase = EmojiEditPhase.Saving; EnableActions(false);
         try
         {
-            var committed = emojiDraft.Commit(); emojiStore.Save(committed);
-            emojiConfig = committed; Interlocked.Increment(ref emojiGeneration);
-            FinishEmojiEdit(); bar?.SetItems(emojiConfig.Items); EditorStatus("emoji 列表已保存。");
+            var committedDraft = emojiDraft.Commit();
+            var nextPersonal = new PrefixSnapshot(
+                personalConfig.Revision + 1,
+                committedDraft.Items,
+                PrefixRules.Icons.Concat(personalConfig.History).Concat(emojiConfig.History).Concat(committedDraft.History));
+            emojiStore.Save(nextPersonal);
+            personalConfig = nextPersonal;
+            activeProfile = EmojiProfileMode.Personal;
+            SaveSettings();
+            emojiConfig = BuildActiveEmojiConfig();
+            Interlocked.Increment(ref emojiGeneration);
+            FinishEmojiEdit(); bar?.SetItems(emojiConfig.Items); EditorStatus("已保存为个人快照（更新不会覆盖）。");
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or InvalidOperationException)
         { emojiPhase = EmojiEditPhase.Editing; EnableActions(false); EditorStatus("保存失败，草稿已保留：" + ex.Message, true); }
     }
+    internal void SaveDefaultEdit()
+    {
+        if (emojiPhase != EmojiEditPhase.Editing || emojiDraft is null || IconPanel.Dragging || IsUpdateBusy) return;
+        emojiPhase = EmojiEditPhase.Saving; EnableActions(false);
+        try
+        {
+            var committedDraft = emojiDraft.Commit();
+            var saved = defaultStore.Save(committedDraft.Items);
+            defaultConfig = saved.Snapshot;
+            activeProfile = EmojiProfileMode.Default;
+            SaveSettings();
+            emojiConfig = BuildActiveEmojiConfig();
+            Interlocked.Increment(ref emojiGeneration);
+            FinishEmojiEdit(); bar?.SetItems(emojiConfig.Items);
+            EditorStatus(saved.SyncedToRepoSource ? "已保存为内置默认并同步源码（可提交随更新发布）。" : "已保存为内置默认（个人快照未改动）。");
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or InvalidOperationException)
+        { emojiPhase = EmojiEditPhase.Editing; EnableActions(false); EditorStatus("保存内置默认失败，草稿已保留：" + ex.Message, true); }
+    }
     internal void CancelEmojiEdit()
     {
-        if (emojiPhase != EmojiEditPhase.Editing) return;
+        if (emojiPhase != EmojiEditPhase.Editing || IsUpdateBusy) return;
         if (recoveringConfig) emojiStore.Load();
         IconPanel.CancelGesture(); FinishEmojiEdit(); EditorStatus("已取消草稿，原配置未改变。");
     }
     void FinishEmojiEdit()
     {
         CancelEditorPointers(); emojiDraft = null; emojiPhase = EmojiEditPhase.Normal;
+        ++profileSwitchVersion;
         ++contextVersion; ++visualEpoch; Interlocked.Increment(ref emojiGeneration); current = null;
         if (IsKeyboardFocusWithin) { Keyboard.ClearFocus(); FocusManager.SetFocusedElement(this, null); }
         ApplyFullWindowActivationStyle();
         RefreshFullItems(); UpdateConfigurationIcons(); FullOpenFeedback(OpenBlocked);
+        FullEmojiViewport.BeginAnimation(OpacityProperty, null); FullEmojiViewport.Opacity = 1; FullEmojiViewport.IsHitTestVisible = true;
         FullEmojiViewport.UpdateLayout();
         if (savedAnchor is not null && fullEmojiButtons.ContainsKey(savedAnchor)) IconPanel.Reveal(savedAnchor); else FullEmojiViewport.ScrollTo(savedOffset, false);
         EnableActions(false);
@@ -277,7 +466,7 @@ public partial class MainWindow
     void CancelEditorPointers()
     {
         IconPanel.CancelGesture(); FullEmojiViewport.Stop();
-        foreach (UIElement control in IconPanel.OrderedButtons.Cast<UIElement>().Concat(new UIElement[] { ClearButton, EmojiSettingsButton, OpenRenameButton, CompactToggle, PinToggle }))
+        foreach (UIElement control in IconPanel.OrderedButtons.Cast<UIElement>().Concat(new UIElement[] { ClearButton, EmojiSettingsButton, SecondaryLeftButton, SecondaryRightButton, UpdateActionButton, OpenRenameButton, CompactToggle, PinToggle }))
             if (control.IsMouseCaptured) control.ReleaseMouseCapture();
         bar?.Motion.Interrupt("配置编辑切换；作废旧指针与延迟动作");
     }
@@ -339,8 +528,11 @@ public partial class MainWindow
     internal void InstallEmojiFixture(IReadOnlyList<string> tokens)
     {
         if (demoHandle == 0 || TestDataRoot is null || EditingEmoji || operation) throw new InvalidOperationException("数量注入只允许隔离夹具。");
-        emojiConfig = PrefixSnapshot.Default.WithItems(tokens.Select((t, i) => new EmojiItem("fixture-" + i, t)));
-        emojiStore.Save(emojiConfig); Interlocked.Increment(ref emojiGeneration);
+        personalConfig = PrefixSnapshot.Default.WithItems(tokens.Select((t, i) => new EmojiItem("fixture-" + i, t)));
+        emojiStore.Save(personalConfig);
+        activeProfile = EmojiProfileMode.Personal;
+        emojiConfig = BuildActiveEmojiConfig();
+        Interlocked.Increment(ref emojiGeneration);
         RefreshFullItems(); bar!.SetItems(emojiConfig.Items); EnableActions(false);
     }
     internal void InjectEmojiSaveFailure(bool enabled)

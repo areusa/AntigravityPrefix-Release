@@ -1,0 +1,22 @@
+{
+  "SchemaVersion": 1,
+  "UnicodeVersion": "17.0",
+  "Items": [
+    {
+      "Id": "default-0",
+      "Token": "\uD83D\uDCA6"
+    },
+    {
+      "Id": "default-1",
+      "Token": "✌️"
+    },
+    {
+      "Id": "default-2",
+      "Token": "❓"
+    },
+    {
+      "Id": "default-3",
+      "Token": "\uD83D\uDEA7"
+    }
+  ]
+}
