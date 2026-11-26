@@ -1,6 +1,6 @@
 # AntigravityPrefix · 会话前缀
 
-Windows x64 免安装浮窗，为本机 Antigravity 会话添加或清除 emoji 前缀，支持可编辑列表、拖拽排序、完整面板与 mini bar。当前版本 **0.1.4**。
+Windows x64 免安装浮窗，为本机 Antigravity 会话添加或清除 emoji 前缀，支持可编辑列表、拖拽排序、完整面板与 mini bar。当前版本 **0.1.5**。
 
 ## 直接使用
 

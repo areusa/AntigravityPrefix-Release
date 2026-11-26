@@ -97,7 +97,7 @@ internal sealed class LivePanelHost
     }
     void MoveNative(TrackingNative.Rect rect)
     {
-        bool ok = TrackingNative.SetWindowPos(new WindowInteropHelper(window).Handle, 0, rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top, 0x14);
+        bool ok = TrackingNative.SetWindowPos(new WindowInteropHelper(window).Handle, 0, rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top, 0x0214);
         NativeMoveCount++; Trace?.Invoke("原生位置提交；成功=" + ok + ";错误=" + (ok ? 0 : Marshal.GetLastWin32Error()));
     }
     internal void Snap(TrackingNative.Rect destination, bool mini)
@@ -118,7 +118,8 @@ internal sealed class LivePanelHost
         }
         // 跨显示器等异常路径先提交透明帧，再搬原生窗口；不把完整面板旧表面暴露在目标位置。
         int version = ++relocationVersion;
-        if (!Relocating) placementCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        bool wasRelocating = Relocating;
+        if (!wasRelocating) placementCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
         Relocating = true;
         var nativeTarget = contained ? existing : needed;
         if (!contained)
@@ -128,7 +129,7 @@ internal sealed class LivePanelHost
             envelope.Union(new Rect(needed.Left, needed.Top, needed.Right - needed.Left, needed.Bottom - needed.Top));
             if (WithinBudget(envelope.Width, envelope.Height)) nativeTarget = new((int)Math.Floor(envelope.Left), (int)Math.Floor(envelope.Top), (int)Math.Ceiling(envelope.Right), (int)Math.Ceiling(envelope.Bottom));
         }
-        window.Opacity = 0; Trace?.Invoke("安全重定位：隐藏内容提交");
+        window.Opacity = 0; if (!wasRelocating) Trace?.Invoke("安全重定位：隐藏内容提交");
         window.Dispatcher.BeginInvoke(DispatcherPriority.ContextIdle, () =>
         {
             if (version != relocationVersion || !window.IsVisible) return;

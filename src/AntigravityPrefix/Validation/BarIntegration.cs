@@ -100,7 +100,7 @@ internal static class BarIntegration
                 Check("多层置顶窗上方调用 PlaceAbove 后小条与宿主均保持非置顶", !WindowTracker.IsTopmost(handle) && !WindowTracker.IsTopmost(target));
             }
             finally { topLo?.Close(); topHi?.Close(); }
-            Check("原生 owner 为目标而不是改宿主 parent", TrackingNative.GetWindow(handle, 4) == target);
+            Check("小条与宿主保持无 owner 耦合且位于宿主上方", TrackingNative.GetWindow(handle, 4) == 0 && Above(handle, target));
             Check("鼠标激活消息不夺焦点", SendMessageW(handle, 0x21, target, 0) == 3);
             Check("未打开输入框时前缀不可用", !bar.ActionsEnabled);
             mock.Left += 137; mock.Top += 33; mock.Width += 83;
@@ -239,14 +239,14 @@ internal static class BarIntegration
             Check("无激活历史时多个候选不得随意绑定", cross.Target is null && !independent.Attached);
             await Command("focusA"); cross.Update();
             var independentHandle = new WindowInteropHelper(independent).Handle;
-            Check("跨进程追踪并设置从属关系", cross.Target?.Handle == ids[0] && TrackingNative.GetWindow(independentHandle, 4) == ids[0] && cross.Target.ProcessId != Environment.ProcessId, new { foreground = Native.GetForegroundWindow().ToInt64(), expected = ids[0].ToInt64(), foregroundPermission });
+            Check("跨进程追踪并保持无跨进程 owner 耦合", cross.Target?.Handle == ids[0] && TrackingNative.GetWindow(independentHandle, 4) == 0 && cross.Target.ProcessId != Environment.ProcessId, new { foreground = Native.GetForegroundWindow().ToInt64(), expected = ids[0].ToInt64(), foregroundPermission });
             canSwitch = false;
             await Command("focusB"); cross.Update();
             Check("事务进行中不切换追踪目标", cross.Target?.Handle == ids[0]);
             canSwitch = true; cross.Update();
-            Check("前台宿主变化后换绑", cross.Target?.Handle == ids[1] && TrackingNative.GetWindow(independentHandle, 4) == ids[1]);
+            Check("前台宿主变化后换绑且不建立跨进程 owner", cross.Target?.Handle == ids[1] && TrackingNative.GetWindow(independentHandle, 4) == 0);
             await Command("closeB"); await WaitUntil(() => cross.Target?.Handle == ids[0], 3500);
-            Check("跨进程宿主正常关闭后可转向唯一候选", Native.IsWindow(independentHandle) && cross.Target?.Handle == ids[0] && TrackingNative.GetWindow(independentHandle, 4) == ids[0]);
+            Check("跨进程宿主正常关闭后可转向唯一候选且无 owner", Native.IsWindow(independentHandle) && cross.Target?.Handle == ids[0] && TrackingNative.GetWindow(independentHandle, 4) == 0);
             host.Kill(); await host.WaitForExitAsync(); await Task.Delay(500); cross.Update();
             Check("跨进程退出后小条存活并展开拖动区", cross.Target is null && TrackingNative.GetWindow(independentHandle, 4) == 0 && !independent.Attached && independent.IsVisible && independent.DesignWidth == CompactBar.LostWidth);
         }

@@ -44,7 +44,7 @@
         </Button>
       </Grid>
       <StackPanel x:Name="UpdateBar" Grid.Row="4" Orientation="Horizontal" VerticalAlignment="Center" Margin="2,2,0,0">
-        <TextBlock x:Name="UpdateVersionText" Text="v0.1.4" FontSize="10" Foreground="#8E8E99" VerticalAlignment="Center"/>
+        <TextBlock x:Name="UpdateVersionText" Text="v0.1.5" FontSize="10" Foreground="#8E8E99" VerticalAlignment="Center"/>
         <TextBlock x:Name="UpdateStateText" Margin="6,0,0,0" Text="" FontSize="10" Foreground="#B5B5C0" TextTrimming="CharacterEllipsis" MaxWidth="230" VerticalAlignment="Center" Visibility="Collapsed"/>
         <Button x:Name="UpdateActionButton" Style="{StaticResource CompactActionButtonStyle}" Width="20" Height="20" Margin="4,0,0,0" Focusable="False" VerticalAlignment="Center" Click="ClickUpdateAction" AutomationProperties.AutomationId="UpdateAction" AutomationProperties.Name="检查更新"/>
       </StackPanel>

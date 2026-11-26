@@ -254,7 +254,7 @@ internal sealed class CompactBar : Window
         int y = rect.Bottom + (int)(6 * scale);
         if (y + h > work.Bottom) y = Math.Max(work.Top, rect.Top - h - (int)(6 * scale));
         var tipHandle = new WindowInteropHelper(feedbackTip).Handle;
-        TrackingNative.SetWindowPos(tipHandle, 0, x, y, w, h, 0x14);
+        TrackingNative.SetWindowPos(tipHandle, 0, x, y, w, h, 0x0214);
         Native.RoundCorners(tipHandle, 9);
     }
     internal void SetStatus(WorkStatus work)

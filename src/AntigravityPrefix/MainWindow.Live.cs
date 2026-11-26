@@ -72,9 +72,11 @@ public partial class MainWindow
                 Topmost = false;
                 if (WindowTracker.IsTopmost(ownHandle))
                     TrackingNative.SetWindowPos(ownHandle, WindowTracker.HwndNoTopmost, 0, 0, 0, 0, WindowTracker.PlaceAboveFlags);
+                TrackingNative.SetWindowLongPtrW(ownHandle, -8, 0);
                 TraceMode("置顶已切换；准备 tracker");
                 tracker = new WindowTracker(bar, () => !operation, TrackingChanged, demoHandle,
-                    testIdentity: DemoLostHost && demoHandle != 0 ? _ => null : null);
+                    testIdentity: DemoLostHost && demoHandle != 0 ? _ => null : null,
+                    trace: log.Write);
                 TraceMode("tracker owner/样式/初次定位已处理");
                 if (miniBounds == default)
                 {

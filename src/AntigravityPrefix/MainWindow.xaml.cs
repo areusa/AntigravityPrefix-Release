@@ -452,7 +452,7 @@ public partial class MainWindow : Window
     }
     void TogglePin(object sender, RoutedEventArgs e)
     {
-        if (EditingEmoji) return;
+        if (EditingEmoji || compact) return;
         Topmost = PinToggle.IsChecked == true;
         if (!SaveSettings()) ShowStatus(new(StatusKind.NeedsAction, "置顶已切换，但设置未能保存"));
     }

@@ -64,6 +64,8 @@ internal sealed class WindowTracker : IDisposable
     readonly Func<nint, WindowIdentity?> identify;
     readonly Func<bool> canRebind;
     readonly Action changed;
+    readonly Action<string, string>? trace;
+    readonly nint desktopHandle = TrackingNative.GetDesktopWindow();
     readonly DispatcherTimer recovery;
     readonly TrackingNative.EventProc callback;
     readonly List<nint> hooks = [];
@@ -71,6 +73,8 @@ internal sealed class WindowTracker : IDisposable
     bool queued, disposed;
     DateTime nextDiscovery;
     WindowIdentity? previous;
+    bool? lastHostTopmost, lastBarTopmost;
+    nint lastRefusedHost, lastRefusedBeforeHost;
     internal WindowIdentity? Target { get; private set; }
     internal bool CanOperate => Target is { } target && target.IsCurrent() && Native.IsWindowVisible(target.Handle) && !Native.IsIconic(target.Handle)
         && Native.BelongsToWindow(Native.GetForegroundWindow(), target.Handle) && !TrackingNative.Cloaked(target.Handle);
@@ -78,9 +82,9 @@ internal sealed class WindowTracker : IDisposable
     internal string? VisualInvalidReason => Target is not { } t ? null : !t.IsCurrent() ? "目标身份失效" : !Native.IsWindowVisible(t.Handle) ? "目标隐藏" : Native.IsIconic(t.Handle) ? "目标最小化" : TrackingNative.Cloaked(t.Handle) ? "目标被系统隐藏" : Native.GetForegroundWindow() == bar.Handle || Native.BelongsToWindow(Native.GetForegroundWindow(), t.Handle) ? null : "切到第三应用";
     internal string Hint { get; private set; } = "等待激活 Antigravity 窗口";
 
-    internal WindowTracker(CompactBar bar, Func<bool> canRebind, Action changed, nint demoWindow = default, Func<nint, WindowIdentity?>? testIdentity = null)
+    internal WindowTracker(CompactBar bar, Func<bool> canRebind, Action changed, nint demoWindow = default, Func<nint, WindowIdentity?>? testIdentity = null, Action<string, string>? trace = null)
     {
-        this.bar = bar; this.canRebind = canRebind; this.changed = changed;
+        this.bar = bar; this.canRebind = canRebind; this.changed = changed; this.trace = trace;
         // 演示模式仅接受本进程创建的夹具。测试解析器只由内部自检传入，无命令行任意 HWND 接口。
         identify = testIdentity ?? (demoWindow != 0 && WindowIdentity.Read(demoWindow, false)?.ProcessId == Environment.ProcessId
             ? hwnd => hwnd == demoWindow ? WindowIdentity.Read(hwnd, false) : null : hwnd => WindowIdentity.Read(hwnd));
@@ -89,12 +93,16 @@ internal sealed class WindowTracker : IDisposable
         source = HwndSource.FromHwnd(handle);
         source.AddHook(WindowMessage);
         TrackingNative.SetWindowLongPtrW(handle, -20, (nint)((TrackingNative.GetWindowLongPtrW(handle, -20).ToInt64() & ~0x00040000L) | 0x08000080L));
+        TrackingNative.SetWindowLongPtrW(handle, -8, 0);
         callback = (_, type, hwnd, objectId, child, _, _) =>
         {
             if (disposed || hwnd == handle) return;
             if (Target?.Handle == hwnd && type is 0xA or 0xB)
                 bar.Dispatcher.BeginInvoke(() => { if (!disposed) bar.Motion.SetDragging(type == 0xA); });
-            if (type == 3 || (Target?.Handle == hwnd && objectId == 0 && child == 0)) Queue();
+            if (type == 3
+                || (type == 0x8004 && hwnd == desktopHandle && child == 0 && objectId is 0 or -4)
+                || (Target?.Handle == hwnd && objectId == 0 && child == 0))
+                Queue();
         };
         hooks.Add(TrackingNative.SetWinEventHook(3, 3, 0, callback, 0, 0, 0));
         hooks.Add(TrackingNative.SetWinEventHook(0x8000, 0x800B, 0, callback, 0, 0, 0));
@@ -154,7 +162,12 @@ internal sealed class WindowTracker : IDisposable
         bool targetChanged = previous != Target;
         if (targetChanged)
         {
-            TrackingNative.SetWindowLongPtrW(handle, -8, Target?.Handle ?? 0);
+            if (TrackingNative.GetWindow(handle, 4) != 0)
+                TrackingNative.SetWindowLongPtrW(handle, -8, 0);
+            lastHostTopmost = null;
+            lastBarTopmost = null;
+            lastRefusedHost = 0;
+            lastRefusedBeforeHost = 0;
             bar.SetAttached(Target is not null);
             previous = Target;
         }
@@ -178,13 +191,45 @@ internal sealed class WindowTracker : IDisposable
                 if (bar.HostPlace is not null) bar.HostPlace(visibleRect, scale);
                 else if (current != rect)
                 {
-                    TrackingNative.SetWindowPos(handle, 0, rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top, 0x14);
+                    TrackingNative.SetWindowPos(handle, 0, rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top, 0x0214);
                     // 坐标更新后再次判定实际重叠，不能沿用旧位置下的“须移出”标记。
                     bar.Motion.Interrupt("宿主定位完成");
                 }
-                // 恢复或换绑时把条窗插在宿主附近，不抬升到其他应用上方。
-                if (wasHidden || targetChanged || lastForeground != foreground || (!IsTopmost(target.Handle) && IsTopmost(handle)))
-                    PlaceAbove(handle, target.Handle);
+                if (TrackingNative.GetWindow(handle, 4) != 0)
+                    TrackingNative.SetWindowLongPtrW(handle, -8, 0);
+                bool hostTop = IsTopmost(target.Handle);
+                bool barTop = IsTopmost(handle);
+                var beforeHost = TrackingNative.GetWindow(target.Handle, 3);
+                if (lastHostTopmost != hostTop || lastBarTopmost != barTop)
+                {
+                    trace?.Invoke("层级状态", $"host=0x{target.Handle:X}(top={hostTop});bar=0x{handle:X}(top={barTop});owner=0x{TrackingNative.GetWindow(handle, 4):X};before=0x{beforeHost:X}(top={IsTopmost(beforeHost)});fg=0x{foreground:X}");
+                    lastHostTopmost = hostTop;
+                    lastBarTopmost = barTop;
+                }
+                // 恢复、换绑或原生 Z 序漂移时把非拥有小条维持在宿主紧上方；若系统拒绝插在宿主自有浮层之前则记录并防抖。
+                bool needsReorder = wasHidden || targetChanged || lastForeground != foreground || hostTop != barTop
+                    || (beforeHost != handle && !(lastRefusedHost == target.Handle && lastRefusedBeforeHost == beforeHost));
+                if (needsReorder)
+                {
+                    PlaceAbove(handle, target.Handle, trace);
+                    var afterBefore = TrackingNative.GetWindow(target.Handle, 3);
+                    if (afterBefore == handle)
+                    {
+                        lastRefusedHost = 0;
+                        lastRefusedBeforeHost = 0;
+                    }
+                    else if (afterBefore == beforeHost)
+                    {
+                        lastRefusedHost = target.Handle;
+                        lastRefusedBeforeHost = afterBefore;
+                    }
+                    bool hostTopAfter = IsTopmost(target.Handle);
+                    bool barTopAfter = IsTopmost(handle);
+                    if (hostTopAfter != hostTop || barTopAfter != barTop)
+                        trace?.Invoke("层级状态", $"重排后变化：host=0x{target.Handle:X}(top={hostTop}->{hostTopAfter});bar=0x{handle:X}(top={barTop}->{barTopAfter});before=0x{afterBefore:X}(top={IsTopmost(afterBefore)})");
+                    lastHostTopmost = hostTopAfter;
+                    lastBarTopmost = barTopAfter;
+                }
             }
             else if (bar.IsVisible) bar.Hide();
         }
@@ -205,7 +250,7 @@ internal sealed class WindowTracker : IDisposable
     nint lastForeground;
     TrackingNative.Rect lastHost;
     double lastDpi;
-    internal const nint HwndTopmost = -1, HwndNoTopmost = -2;
+    internal const nint HwndTop = 0, HwndTopmost = -1, HwndNoTopmost = -2;
     internal const uint PlaceAboveFlags = 0x0213; // SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER
 
     internal static bool IsTopmost(nint hwnd) => hwnd != 0 && (TrackingNative.GetWindowLongPtrW(hwnd, -20).ToInt64() & 0x8L) != 0;
@@ -214,24 +259,38 @@ internal sealed class WindowTracker : IDisposable
     {
         if (beforeHost == bar && hostTopmost == barTopmost) return null;
         var anchor = beforeHost == bar ? beforeBar : beforeHost;
-        bool anchorTopmost = beforeHost == bar ? beforeBarTopmost : beforeHostTopmost;
+        if (anchor == bar) anchor = 0;
+        bool anchorTopmost = anchor != 0 && (beforeHost == bar ? beforeBarTopmost : beforeHostTopmost);
         if (!hostTopmost)
-            return anchor == 0 || anchorTopmost ? HwndNoTopmost : anchor;
+            return anchor == 0 || anchorTopmost ? (barTopmost ? HwndNoTopmost : HwndTop) : anchor;
         return anchor == 0 ? HwndTopmost : anchor;
     }
 
-    internal static void PlaceAbove(nint bar, nint host)
+    internal static void PlaceAbove(nint bar, nint host, Action<string, string>? trace = null)
     {
-        if (bar == 0 || host == 0) return;
+        if (bar == 0 || host == 0 || bar == host) return;
         bool hostTopmost = IsTopmost(host);
         bool barTopmost = IsTopmost(bar);
         var beforeHost = TrackingNative.GetWindow(host, 3);
         var beforeBar = beforeHost == bar ? TrackingNative.GetWindow(bar, 3) : 0;
         var after = ResolveInsertAfter(bar, beforeHost, beforeBar, hostTopmost, barTopmost, IsTopmost(beforeHost), IsTopmost(beforeBar));
         if (after is null) return;
-        TrackingNative.SetWindowPos(bar, after.Value, 0, 0, 0, 0, PlaceAboveFlags);
-        if (!hostTopmost && IsTopmost(bar))
+        if (!hostTopmost && barTopmost)
+        {
+            trace?.Invoke("层级自愈", $"小条误带置顶标志：host=0x{host:X}(top=False);bar=0x{bar:X}(top=True->False);after=0x{after.Value:X}");
             TrackingNative.SetWindowPos(bar, HwndNoTopmost, 0, 0, 0, 0, PlaceAboveFlags);
+            if (after.Value != HwndNoTopmost && after.Value != HwndTop)
+                TrackingNative.SetWindowPos(bar, after.Value, 0, 0, 0, 0, PlaceAboveFlags);
+        }
+        else
+        {
+            TrackingNative.SetWindowPos(bar, after.Value, 0, 0, 0, 0, PlaceAboveFlags);
+        }
+        if (!hostTopmost && IsTopmost(bar))
+        {
+            trace?.Invoke("层级自愈", $"二次降层：host=0x{host:X};bar=0x{bar:X};after=0x{after.Value:X}");
+            TrackingNative.SetWindowPos(bar, HwndNoTopmost, 0, 0, 0, 0, PlaceAboveFlags);
+        }
     }
     internal static TrackingNative.Rect Place(TrackingNative.Rect host, TrackingNative.Rect work, double scale, double width, double height)
     {
@@ -251,7 +310,7 @@ internal sealed class WindowTracker : IDisposable
         double scale = Math.Max(96, TrackingNative.GetDpiForWindow(handle)) / 96d;
         int x = Math.Clamp(rect.Left, work.Left, Math.Max(work.Left, work.Right - w)), y = Math.Clamp(rect.Top, work.Top, Math.Max(work.Top, work.Bottom - h));
         if (bar.HostPlace is { } place) { place(new(x, y, x + w, y + h), scale); return; }
-        TrackingNative.SetWindowPos(handle, 0, x - (int)Math.Round(CompactBar.MotionPadX * scale), y - (int)Math.Round(CompactBar.MotionPadY * scale), 0, 0, 0x15);
+        TrackingNative.SetWindowPos(handle, 0, x - (int)Math.Round(CompactBar.MotionPadX * scale), y - (int)Math.Round(CompactBar.MotionPadY * scale), 0, 0, 0x0215);
     }
     public void Dispose()
     {
@@ -284,6 +343,7 @@ internal static class TrackingNative
     [DllImport("user32.dll")] static extern nint MonitorFromWindow(nint hwnd, uint flags);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool GetMonitorInfoW(nint monitor, ref MonitorInfo info);
     [DllImport("user32.dll")] internal static extern nint GetWindow(nint hwnd, uint command);
+    [DllImport("user32.dll")] internal static extern nint GetDesktopWindow();
     [DllImport("user32.dll")] internal static extern bool EnumWindows(EnumProc callback, nint parameter);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern nint GetWindowLongPtrW(nint hwnd, int index);
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] internal static extern nint SetWindowLongPtrW(nint hwnd, int index, nint value);
